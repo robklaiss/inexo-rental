@@ -1,0 +1,21 @@
+.DS_Store
+
+# Local runtime data and sensitive state
+inexo_rental.sqlite3
+*.sqlite3.backup*
+*.pre-restore-*
+mail.log
+.env
+
+# Release artifacts and backups
+deploy/releases/
+deploy/backups/
+
+# Python/cache artifacts
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Dependency/vendor folders, if added locally
+vendor/
+node_modules/
