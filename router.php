@@ -13,7 +13,14 @@ if ($base !== '' && ($path === $base || str_starts_with($path, $base . '/'))) {
 $file = __DIR__ . $filePath;
 
 if ($filePath !== '/' && is_file($file)) {
-    $contentType = function_exists('mime_content_type') ? mime_content_type($file) : false;
+    $extension = strtolower(pathinfo($file, PATHINFO_EXTENSION));
+    $contentType = match ($extension) {
+        'css' => 'text/css',
+        'js' => 'application/javascript',
+        'svg' => 'image/svg+xml',
+        'avif' => 'image/avif',
+        default => function_exists('mime_content_type') ? mime_content_type($file) : false,
+    };
     if (is_string($contentType) && $contentType !== '') {
         header('Content-Type: ' . $contentType);
     }

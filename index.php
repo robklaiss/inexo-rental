@@ -20,6 +20,16 @@ const FAVICON_IMAGE = ASSET_BASE . '/images/favicon.png';
 const WEBCLIP_IMAGE = ASSET_BASE . '/images/webclip.png';
 const ADMIN_PASSWORD_USERNAME = 'adminexo';
 const ADMIN_PASSWORD_HASH = '$2y$12$4Iv3JyClC4Dp5sI51qN0EOr9u9PPjywIi1jTJ7yY0rbwRSP81MZqG';
+const DEFAULT_FREIGHT_BASE_FEE = 0.0;
+const DEFAULT_FREIGHT_PER_KM = 0.0;
+const DEFAULT_FREIGHT_MIN_FEE = 0.0;
+const DEFAULT_FREIGHT_ROUND_TRIP_FACTOR = 2.0;
+const OFFER_DURATION_DAYS = 10;
+const DEFAULT_FREIGHT_TRUCK_TYPES = [
+    ['slug' => 'pequeno', 'name' => 'Camion pequeno', 'sort_order' => 10],
+    ['slug' => 'mediano', 'name' => 'Camion mediano', 'sort_order' => 20],
+    ['slug' => 'grande', 'name' => 'Camion grande', 'sort_order' => 30],
+];
 
 $dominicanCities = [
     'Santo Domingo',
@@ -120,7 +130,7 @@ function prefix_public_paths(string $html): string
     }
 
     return preg_replace_callback(
-        '/\b(href|src|action|content|data-product-url|data-image|data-placeholder-image)=(["\'])\/(?!\/)([^"\']*)\2/i',
+        '/\b(href|src|action|content|data-product-url|data-product-image|data-image|data-placeholder-image)=(["\'])\/(?!\/)([^"\']*)\2/i',
         static function (array $match) use ($base): string {
             $path = '/' . $match[3];
             if ($path === $base || str_starts_with($path, $base . '/')) {
@@ -172,11 +182,34 @@ function init_db(): void
             specs TEXT NOT NULL DEFAULT '[]',
             is_featured INTEGER NOT NULL DEFAULT 0,
             is_new INTEGER NOT NULL DEFAULT 0,
+            has_stock INTEGER NOT NULL DEFAULT 1,
+            stock_quantity REAL NOT NULL DEFAULT 1,
+            is_disabled INTEGER NOT NULL DEFAULT 0,
+            is_offer INTEGER NOT NULL DEFAULT 0,
+            offer_starts_at TEXT NOT NULL DEFAULT '',
+            offer_ends_at TEXT NOT NULL DEFAULT '',
+            product_type TEXT NOT NULL DEFAULT 'standard',
+            labor_unit_label TEXT NOT NULL DEFAULT 'jornada',
+            labor_unit_price REAL NOT NULL DEFAULT 0,
+            labor_min_units REAL NOT NULL DEFAULT 1,
             deleted_at TEXT,
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         )"
     );
     ensure_column('products', 'deleted_at', 'TEXT');
+    ensure_column('products', 'has_stock', 'INTEGER NOT NULL DEFAULT 1');
+    ensure_column('products', 'stock_quantity', 'REAL NOT NULL DEFAULT 1');
+    ensure_column('products', 'is_disabled', 'INTEGER NOT NULL DEFAULT 0');
+    ensure_column('products', 'is_offer', 'INTEGER NOT NULL DEFAULT 0');
+    ensure_column('products', 'offer_starts_at', "TEXT NOT NULL DEFAULT ''");
+    ensure_column('products', 'offer_ends_at', "TEXT NOT NULL DEFAULT ''");
+    ensure_column('products', 'product_type', "TEXT NOT NULL DEFAULT 'standard'");
+    ensure_column('products', 'labor_unit_label', "TEXT NOT NULL DEFAULT 'jornada'");
+    ensure_column('products', 'labor_unit_price', 'REAL NOT NULL DEFAULT 0');
+    ensure_column('products', 'labor_min_units', 'REAL NOT NULL DEFAULT 1');
+    $pdo->exec("UPDATE products SET has_stock = 0 WHERE stock_quantity <= 0");
+    $pdo->exec("UPDATE products SET offer_starts_at = datetime('now') WHERE is_offer = 1 AND offer_starts_at = ''");
+    $pdo->exec("UPDATE products SET offer_ends_at = datetime(offer_starts_at, '+" . OFFER_DURATION_DAYS . " days') WHERE is_offer = 1 AND offer_ends_at = '' AND offer_starts_at <> ''");
     $pdo->exec(
         "CREATE TABLE IF NOT EXISTS reservations (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -246,10 +279,22 @@ function init_db(): void
             user_id INTEGER NOT NULL,
             status TEXT NOT NULL DEFAULT 'pendiente_validacion',
             customer_snapshot TEXT NOT NULL DEFAULT '{}',
+            fiscal_snapshot TEXT NOT NULL DEFAULT '{}',
+            delivery_snapshot TEXT NOT NULL DEFAULT '{}',
+            subtotal_amount REAL NOT NULL DEFAULT 0,
+            freight_amount REAL NOT NULL DEFAULT 0,
+            total_amount REAL NOT NULL DEFAULT 0,
+            proforma_sent_at TEXT,
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY(user_id) REFERENCES users(id)
         )"
     );
+    ensure_column('orders', 'fiscal_snapshot', "TEXT NOT NULL DEFAULT '{}'");
+    ensure_column('orders', 'delivery_snapshot', "TEXT NOT NULL DEFAULT '{}'");
+    ensure_column('orders', 'subtotal_amount', 'REAL NOT NULL DEFAULT 0');
+    ensure_column('orders', 'freight_amount', 'REAL NOT NULL DEFAULT 0');
+    ensure_column('orders', 'total_amount', 'REAL NOT NULL DEFAULT 0');
+    ensure_column('orders', 'proforma_sent_at', 'TEXT');
     $pdo->exec(
         "CREATE TABLE IF NOT EXISTS order_items (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -257,17 +302,31 @@ function init_db(): void
             product_id INTEGER,
             product_name TEXT NOT NULL,
             product_url TEXT NOT NULL DEFAULT '',
+            image_url TEXT NOT NULL DEFAULT '',
             mode TEXT NOT NULL DEFAULT 'rental',
             quantity INTEGER NOT NULL DEFAULT 1,
+            unit_price REAL NOT NULL DEFAULT 0,
+            subtotal REAL NOT NULL DEFAULT 0,
+            price_label TEXT NOT NULL DEFAULT '',
+            rental_days INTEGER NOT NULL DEFAULT 0,
+            rental_units INTEGER NOT NULL DEFAULT 0,
             rental_plan TEXT NOT NULL DEFAULT '',
             start_date TEXT NOT NULL DEFAULT '',
             end_date TEXT NOT NULL DEFAULT '',
             city TEXT NOT NULL DEFAULT '',
+            item_details_json TEXT NOT NULL DEFAULT '{}',
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY(order_id) REFERENCES orders(id),
             FOREIGN KEY(product_id) REFERENCES products(id)
         )"
     );
+    ensure_column('order_items', 'image_url', "TEXT NOT NULL DEFAULT ''");
+    ensure_column('order_items', 'unit_price', 'REAL NOT NULL DEFAULT 0');
+    ensure_column('order_items', 'subtotal', 'REAL NOT NULL DEFAULT 0');
+    ensure_column('order_items', 'price_label', "TEXT NOT NULL DEFAULT ''");
+    ensure_column('order_items', 'rental_days', 'INTEGER NOT NULL DEFAULT 0');
+    ensure_column('order_items', 'rental_units', 'INTEGER NOT NULL DEFAULT 0');
+    ensure_column('order_items', 'item_details_json', "TEXT NOT NULL DEFAULT '{}'");
     $pdo->exec(
         "CREATE TABLE IF NOT EXISTS contact_messages (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -281,9 +340,57 @@ function init_db(): void
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         )"
     );
+    $pdo->exec(
+        "CREATE TABLE IF NOT EXISTS app_settings (
+            name TEXT PRIMARY KEY,
+            value TEXT NOT NULL DEFAULT ''
+        )"
+    );
+    seed_app_settings();
+    $pdo->exec(
+        "CREATE TABLE IF NOT EXISTS freight_truck_types (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            slug TEXT NOT NULL UNIQUE,
+            name TEXT NOT NULL,
+            cost_per_km REAL NOT NULL DEFAULT 0,
+            is_active INTEGER NOT NULL DEFAULT 1,
+            sort_order INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )"
+    );
+    ensure_column('freight_truck_types', 'cost_per_km', 'REAL NOT NULL DEFAULT 0');
+    ensure_column('freight_truck_types', 'is_active', 'INTEGER NOT NULL DEFAULT 1');
+    ensure_column('freight_truck_types', 'sort_order', 'INTEGER NOT NULL DEFAULT 0');
+    seed_freight_truck_types();
+    $pdo->exec(
+        "CREATE TABLE IF NOT EXISTS labor_work_types (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL UNIQUE,
+            slug TEXT NOT NULL UNIQUE,
+            base_price REAL NOT NULL DEFAULT 0,
+            worker_cost REAL NOT NULL DEFAULT 0,
+            time_cost REAL NOT NULL DEFAULT 0,
+            area_cost_per_m2 REAL NOT NULL DEFAULT 0,
+            time_unit TEXT NOT NULL DEFAULT 'dia',
+            requires_area INTEGER NOT NULL DEFAULT 0,
+            is_active INTEGER NOT NULL DEFAULT 1,
+            sort_order INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )"
+    );
+    ensure_column('labor_work_types', 'base_price', 'REAL NOT NULL DEFAULT 0');
+    ensure_column('labor_work_types', 'worker_cost', 'REAL NOT NULL DEFAULT 0');
+    ensure_column('labor_work_types', 'time_cost', 'REAL NOT NULL DEFAULT 0');
+    ensure_column('labor_work_types', 'area_cost_per_m2', 'REAL NOT NULL DEFAULT 0');
+    ensure_column('labor_work_types', 'time_unit', "TEXT NOT NULL DEFAULT 'dia'");
+    ensure_column('labor_work_types', 'requires_area', 'INTEGER NOT NULL DEFAULT 0');
+    ensure_column('labor_work_types', 'is_active', 'INTEGER NOT NULL DEFAULT 1');
+    ensure_column('labor_work_types', 'sort_order', 'INTEGER NOT NULL DEFAULT 0');
+    seed_labor_work_types();
 
     $count = (int) $pdo->query('SELECT COUNT(*) FROM products')->fetchColumn();
     if ($count > 0) {
+        ensure_labor_product();
         seed_lookup_tables_from_products();
         return;
     }
@@ -417,7 +524,56 @@ function init_db(): void
     foreach ($products as $product) {
         $stmt->execute($product);
     }
+    ensure_labor_product();
     seed_lookup_tables_from_products();
+}
+
+function ensure_labor_product(): void
+{
+    $stmt = db()->prepare('SELECT id FROM products WHERE slug = ? LIMIT 1');
+    $stmt->execute(['mano-de-obra']);
+    if ($stmt->fetchColumn()) {
+        return;
+    }
+
+    $images = json_encode([ASSET_BASE . '/images/imagen-producto-generico.avif'], JSON_UNESCAPED_SLASHES);
+    $specs = json_encode([
+        ['Tipo', 'Servicio configurable'],
+        ['Unidad', 'Jornada'],
+    ], JSON_UNESCAPED_UNICODE);
+    db()->prepare(
+        "INSERT INTO products (
+            slug, name, code, brand, category, specialization, short_description,
+            description, status, price_sale_used, price_sale_new, rental_daily,
+            rental_weekly, rental_monthly, images, specs, is_featured, is_new,
+            stock_quantity, product_type, labor_unit_label, labor_unit_price,
+            labor_min_units
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    )->execute([
+        'mano-de-obra',
+        'Mano de Obra',
+        'INX-MDO-001',
+        'Inexo',
+        'Servicios',
+        'Servicios',
+        'Servicio configurable de mano de obra para pedidos especiales.',
+        'Producto especial para cotizar mano de obra desde el backend. Configura la unidad, minimo y precio por unidad en el administrador.',
+        'Disponible',
+        0,
+        0,
+        0,
+        0,
+        0,
+        $images,
+        $specs,
+        0,
+        0,
+        999,
+        'labor',
+        'jornada',
+        0,
+        1,
+    ]);
 }
 
 function ensure_column(string $table, string $column, string $definition): void
@@ -432,12 +588,359 @@ function ensure_column(string $table, string $column, string $definition): void
     db()->exec("ALTER TABLE {$table} ADD COLUMN {$column} {$definition}");
 }
 
+function app_setting_defaults(): array
+{
+    return [
+        'company_origin_address' => '',
+        'company_origin_lat' => '',
+        'company_origin_lng' => '',
+        'company_origin_place_id' => '',
+        'freight_base_fee' => (string) DEFAULT_FREIGHT_BASE_FEE,
+        'freight_per_km' => (string) DEFAULT_FREIGHT_PER_KM,
+        'freight_min_fee' => (string) DEFAULT_FREIGHT_MIN_FEE,
+        'freight_round_trip_factor' => (string) DEFAULT_FREIGHT_ROUND_TRIP_FACTOR,
+        'google_maps_browser_key' => '',
+    ];
+}
+
+function seed_app_settings(): void
+{
+    $stmt = db()->prepare('INSERT OR IGNORE INTO app_settings (name, value) VALUES (?, ?)');
+    foreach (app_setting_defaults() as $name => $value) {
+        $stmt->execute([$name, $value]);
+    }
+}
+
+function seed_freight_truck_types(): void
+{
+    $stmt = db()->prepare(
+        'INSERT OR IGNORE INTO freight_truck_types (slug, name, cost_per_km, is_active, sort_order) VALUES (?, ?, 0, 1, ?)'
+    );
+    foreach (DEFAULT_FREIGHT_TRUCK_TYPES as $type) {
+        $stmt->execute([$type['slug'], $type['name'], $type['sort_order']]);
+    }
+}
+
+function seed_labor_work_types(): void
+{
+    db()->prepare(
+        "INSERT OR IGNORE INTO labor_work_types (
+            name, slug, base_price, worker_cost, time_cost, area_cost_per_m2,
+            time_unit, requires_area, is_active, sort_order
+        ) VALUES (?, ?, 0, 0, 0, 0, 'dia', 0, 1, 10)"
+    )->execute(['Instalacion', 'instalacion']);
+}
+
+function app_setting(string $name, string $default = ''): string
+{
+    $defaults = app_setting_defaults();
+    $stmt = db()->prepare('SELECT value FROM app_settings WHERE name = ?');
+    $stmt->execute([$name]);
+    $value = $stmt->fetchColumn();
+
+    if ($value === false || $value === '') {
+        return $default !== '' ? $default : (string) ($defaults[$name] ?? '');
+    }
+
+    return (string) $value;
+}
+
+function app_setting_float(string $name, float $default = 0.0): float
+{
+    $value = app_setting($name, (string) $default);
+
+    return is_numeric($value) ? (float) $value : $default;
+}
+
+function freight_settings(): array
+{
+    return [
+        'origin_address' => app_setting('company_origin_address'),
+        'origin_lat' => app_setting('company_origin_lat'),
+        'origin_lng' => app_setting('company_origin_lng'),
+        'origin_place_id' => app_setting('company_origin_place_id'),
+        'base_fee' => app_setting_float('freight_base_fee', DEFAULT_FREIGHT_BASE_FEE),
+        'per_km' => app_setting_float('freight_per_km', DEFAULT_FREIGHT_PER_KM),
+        'min_fee' => app_setting_float('freight_min_fee', DEFAULT_FREIGHT_MIN_FEE),
+        'round_trip_factor' => app_setting_float('freight_round_trip_factor', DEFAULT_FREIGHT_ROUND_TRIP_FACTOR),
+    ];
+}
+
+function freight_truck_types(bool $activeOnly = false): array
+{
+    $sql = 'SELECT * FROM freight_truck_types';
+    if ($activeOnly) {
+        $sql .= ' WHERE is_active = 1';
+    }
+    $sql .= ' ORDER BY sort_order ASC, id ASC';
+
+    return db()->query($sql)->fetchAll();
+}
+
+function labor_time_unit_options(string $selected): string
+{
+    $units = [
+        'hora' => 'Hora',
+        'dia' => 'Dia',
+        'semana' => 'Semana',
+        'unidad' => 'Unidad',
+    ];
+    $html = '';
+    foreach ($units as $value => $label) {
+        $html .= '<option value="' . h($value) . '"' . ($value === $selected ? ' selected' : '') . '>' . h($label) . '</option>';
+    }
+
+    return $html;
+}
+
+function labor_work_types(bool $activeOnly = false): array
+{
+    $sql = 'SELECT * FROM labor_work_types';
+    if ($activeOnly) {
+        $sql .= ' WHERE is_active = 1';
+    }
+    $sql .= ' ORDER BY sort_order ASC, id ASC';
+
+    return db()->query($sql)->fetchAll();
+}
+
+function labor_work_type_by_id(int $workTypeId, bool $activeOnly = false): ?array
+{
+    $sql = 'SELECT * FROM labor_work_types WHERE id = ?';
+    if ($activeOnly) {
+        $sql .= ' AND is_active = 1';
+    }
+    $stmt = db()->prepare($sql);
+    $stmt->execute([$workTypeId]);
+    $workType = $stmt->fetch();
+
+    return $workType ?: null;
+}
+
+function labor_time_unit_label(string $unit, float $amount = 1.0): string
+{
+    $singular = match ($unit) {
+        'hora' => 'hora',
+        'semana' => 'semana',
+        'unidad' => 'unidad',
+        default => 'dia',
+    };
+    if (abs($amount - 1.0) < 0.0001) {
+        return $singular;
+    }
+
+    return match ($singular) {
+        'hora' => 'horas',
+        'semana' => 'semanas',
+        'unidad' => 'unidades',
+        default => 'dias',
+    };
+}
+
+function labor_number(float $value): string
+{
+    return rtrim(rtrim(number_format($value, 2, '.', ''), '0'), '.');
+}
+
+function labor_calculation_formula_label(): string
+{
+    return 'total = precio_base + (costo_trabajador x trabajadores x tiempo) + (costo_tiempo x tiempo) + (costo_m2 x m²)';
+}
+
+function calculate_labor_total(array $workType, float $timeAmount, int $workers, float $areaM2): array
+{
+    $timeAmount = max(0.01, $timeAmount);
+    $workers = max(1, $workers);
+    $areaM2 = max(0.0, $areaM2);
+    $basePrice = max(0.0, (float) ($workType['base_price'] ?? 0));
+    $workerCost = max(0.0, (float) ($workType['worker_cost'] ?? 0));
+    $timeCost = max(0.0, (float) ($workType['time_cost'] ?? 0));
+    $areaCostPerM2 = max(0.0, (float) ($workType['area_cost_per_m2'] ?? 0));
+    $workerTotal = $workerCost * $workers * $timeAmount;
+    $timeTotal = $timeCost * $timeAmount;
+    $areaTotal = $areaCostPerM2 * $areaM2;
+    $total = round($basePrice + $workerTotal + $timeTotal + $areaTotal, 2);
+
+    return [
+        'work_type_id' => (int) ($workType['id'] ?? 0),
+        'work_type' => (string) ($workType['name'] ?? ''),
+        'time_amount' => $timeAmount,
+        'time_unit' => (string) ($workType['time_unit'] ?? 'dia'),
+        'workers' => $workers,
+        'area_m2' => $areaM2,
+        'base_price' => $basePrice,
+        'worker_cost' => $workerCost,
+        'time_cost' => $timeCost,
+        'area_cost_per_m2' => $areaCostPerM2,
+        'components' => [
+            'base_price' => round($basePrice, 2),
+            'workers' => round($workerTotal, 2),
+            'time' => round($timeTotal, 2),
+            'area_m2' => round($areaTotal, 2),
+        ],
+        'formula' => labor_calculation_formula_label(),
+        'total' => $total,
+    ];
+}
+
+function labor_calculation_from_item(array $item): ?array
+{
+    $details = $item['labor_details'] ?? [];
+    if (!is_array($details)) {
+        $details = [];
+    }
+    $workType = labor_work_type_by_id((int) ($details['work_type_id'] ?? 0), true);
+    if (!$workType) {
+        return null;
+    }
+
+    return calculate_labor_total(
+        $workType,
+        (float) ($details['time_amount'] ?? 1),
+        (int) ($details['workers'] ?? 1),
+        (float) ($details['area_m2'] ?? 0)
+    );
+}
+
+function order_item_details(array $item): array
+{
+    $details = json_decode((string) ($item['item_details_json'] ?? '{}'), true);
+
+    return is_array($details) ? $details : [];
+}
+
+function labor_detail_lines(array $details): array
+{
+    if (($details['kind'] ?? '') !== 'labor') {
+        return [];
+    }
+    $timeAmount = (float) ($details['time_amount'] ?? 0);
+    $timeUnit = labor_time_unit_label((string) ($details['time_unit'] ?? 'dia'), $timeAmount);
+    $area = (float) ($details['area_m2'] ?? 0);
+    $components = $details['components'] ?? [];
+
+    return array_filter([
+        'Tipo de trabajo: ' . (string) ($details['work_type'] ?? ''),
+        'Tiempo: ' . labor_number($timeAmount) . ' ' . $timeUnit,
+        'Trabajadores: ' . (int) ($details['workers'] ?? 1),
+        $area > 0 ? 'Area: ' . labor_number($area) . ' m²' : '',
+        'Precio base: ' . money($details['base_price'] ?? 0),
+        'Costo trabajadores: ' . money($components['workers'] ?? 0),
+        'Costo tiempo: ' . money($components['time'] ?? 0),
+        $area > 0 ? 'Costo m²: ' . money($components['area_m2'] ?? 0) : '',
+        'Formula: ' . (string) ($details['formula'] ?? labor_calculation_formula_label()),
+    ]);
+}
+
+function freight_truck_type_by_id(int $truckTypeId, bool $activeOnly = false): ?array
+{
+    $sql = 'SELECT * FROM freight_truck_types WHERE id = ?';
+    if ($activeOnly) {
+        $sql .= ' AND is_active = 1';
+    }
+    $stmt = db()->prepare($sql);
+    $stmt->execute([$truckTypeId]);
+    $truckType = $stmt->fetch();
+
+    return $truckType ?: null;
+}
+
+function default_freight_truck_type(): ?array
+{
+    $types = freight_truck_types(true);
+
+    return $types[0] ?? null;
+}
+
+function google_maps_browser_key(): string
+{
+    $fromEnv = env_value(['INEXO_GOOGLE_MAPS_BROWSER_KEY', 'GOOGLE_MAPS_BROWSER_KEY']);
+
+    return $fromEnv !== '' ? $fromEnv : app_setting('google_maps_browser_key');
+}
+
+function calculate_freight_amount(float $oneWayKm, ?array $truckType = null): float
+{
+    if ($oneWayKm <= 0) {
+        return 0.0;
+    }
+    $settings = freight_settings();
+    $costPerKm = $truckType !== null
+        ? max(0.0, (float) ($truckType['cost_per_km'] ?? 0))
+        : max(0.0, (float) $settings['per_km']);
+    $amount = $oneWayKm * $settings['round_trip_factor'] * $costPerKm;
+
+    return round($amount, 2);
+}
+
 function decode_product(array $product): array
 {
     $product['images'] = json_decode($product['images'] ?: '[]', true) ?: [];
     $product['specs'] = json_decode($product['specs'] ?: '[]', true) ?: [];
 
     return $product;
+}
+
+function product_is_disabled(array $product): bool
+{
+    return (int) ($product['is_disabled'] ?? 0) === 1;
+}
+
+function product_has_stock(array $product): bool
+{
+    if (array_key_exists('has_stock', $product)) {
+        return (int) ($product['has_stock'] ?? 1) === 1;
+    }
+
+    $stock = (float) ($product['stock_quantity'] ?? 1);
+
+    return $stock > 0;
+}
+
+function product_is_orderable(array $product): bool
+{
+    return !product_is_disabled($product) && product_has_stock($product);
+}
+
+function product_is_offer_active(array $product): bool
+{
+    if ((int) ($product['is_offer'] ?? 0) !== 1) {
+        return false;
+    }
+    $startsAt = trim((string) ($product['offer_starts_at'] ?? ''));
+    if ($startsAt !== '' && strtotime($startsAt) > time()) {
+        return false;
+    }
+    $endsAt = trim((string) ($product['offer_ends_at'] ?? ''));
+    if ($endsAt === '') {
+        return false;
+    }
+
+    return strtotime($endsAt) >= time();
+}
+
+function product_offer_countdown_html(array $product, string $className = 'app-offer-countdown'): string
+{
+    if (!product_is_offer_active($product)) {
+        return '';
+    }
+
+    $endsAt = trim((string) ($product['offer_ends_at'] ?? ''));
+    if ($endsAt === '') {
+        return '';
+    }
+
+    return '<span class="' . h($className) . '" data-offer-countdown="' . h(date('c', strtotime($endsAt))) . '"></span>';
+}
+
+function product_primary_image(array $product): string
+{
+    return $product['images'][0] ?? ASSET_BASE . '/images/imagen-producto-generico.avif';
+}
+
+function product_type_label(array $product): string
+{
+    return (string) ($product['product_type'] ?? 'standard') === 'labor' ? 'Mano de Obra' : 'Equipo';
 }
 
 function admin_product_thumbnail(array $product): string
@@ -654,6 +1157,7 @@ function admin_nav(string $active = 'productos'): string
         'especializaciones' => ['/admin/especializaciones', 'Especializacion'],
         'marcas' => ['/admin/marcas', 'Marcas'],
         'pedidos' => ['/admin/pedidos', 'Pedidos'],
+        'configuracion' => ['/admin/configuracion', 'Configuracion'],
         'contacto' => ['/admin/contacto', 'Contacto'],
         'usuarios' => ['/admin/usuarios', 'Usuarios'],
     ];
@@ -1060,13 +1564,42 @@ function smtp_send_email(string $recipient, string $subject, string $body, strin
     return true;
 }
 
-function send_email(string $recipient, string $subject, string $body, string $contentType = 'text/plain; charset=UTF-8', ?string $replyTo = null): bool
+function email_body_with_attachments(string $body, string $contentType, array $attachments, string &$finalContentType): string
+{
+    if ($attachments === []) {
+        $finalContentType = $contentType;
+        return $body;
+    }
+
+    $boundary = 'inx_' . bin2hex(random_bytes(12));
+    $finalContentType = 'multipart/mixed; boundary="' . $boundary . '"';
+    $message = "--{$boundary}\r\n";
+    $message .= 'Content-Type: ' . $contentType . "\r\n";
+    $message .= "Content-Transfer-Encoding: 8bit\r\n\r\n";
+    $message .= normalize_email_body($body) . "\r\n";
+    foreach ($attachments as $attachment) {
+        $filename = clean_mail_header((string) ($attachment['filename'] ?? 'archivo.pdf'));
+        $mime = clean_mail_header((string) ($attachment['content_type'] ?? 'application/octet-stream'));
+        $data = (string) ($attachment['data'] ?? '');
+        $message .= "--{$boundary}\r\n";
+        $message .= 'Content-Type: ' . $mime . '; name="' . addslashes($filename) . '"' . "\r\n";
+        $message .= "Content-Transfer-Encoding: base64\r\n";
+        $message .= 'Content-Disposition: attachment; filename="' . addslashes($filename) . '"' . "\r\n\r\n";
+        $message .= chunk_split(base64_encode($data), 76, "\r\n");
+    }
+    $message .= "--{$boundary}--\r\n";
+
+    return $message;
+}
+
+function send_email(string $recipient, string $subject, string $body, string $contentType = 'text/plain; charset=UTF-8', ?string $replyTo = null, array $attachments = []): bool
 {
     $recipient = filter_var($recipient, FILTER_VALIDATE_EMAIL);
     if (!$recipient) {
         return false;
     }
 
+    $body = email_body_with_attachments($body, $contentType, $attachments, $contentType);
     $error = '';
     if (smtp_config() !== null) {
         $sent = smtp_send_email((string) $recipient, $subject, $body, $contentType, $replyTo, $error);
@@ -1112,6 +1645,7 @@ function order_mode_label(string $mode): string
     return match ($mode) {
         'purchase' => 'Compra',
         'rental' => 'Alquiler',
+        'labor' => 'Mano de Obra',
         default => $mode,
     };
 }
@@ -1185,6 +1719,7 @@ function send_order_customer_email(array $order, array $items, string $subject, 
             trim((string) ($item['end_date'] ?? '')) !== '' ? 'Hasta: ' . (string) $item['end_date'] : '',
             trim((string) ($item['city'] ?? '')) !== '' ? 'Ciudad: ' . (string) $item['city'] : '',
         ]);
+        $detailParts = array_merge($detailParts, labor_detail_lines(order_item_details($item)));
         $rows .= '
           <tr>
             <td style="padding:12px 0;border-bottom:1px solid #eeeeee;">
@@ -1339,12 +1874,15 @@ function current_url(): string
     return rtrim(base_url(), '/') . '/' . ltrim($uri, '/');
 }
 
-function products(string $where = '', array $params = [], ?int $limit = null, bool $includeDeleted = false): array
+function products(string $where = '', array $params = [], ?int $limit = null, bool $includeDeleted = false, bool $includeDisabled = false): array
 {
     $sql = 'SELECT * FROM products';
     $clauses = [];
     if (!$includeDeleted) {
         $clauses[] = 'deleted_at IS NULL';
+    }
+    if (!$includeDisabled) {
+        $clauses[] = 'is_disabled = 0';
     }
     if ($where !== '') {
         $clauses[] = '(' . $where . ')';
@@ -1365,7 +1903,7 @@ function products(string $where = '', array $params = [], ?int $limit = null, bo
 
 function product_by_slug(string $slug): ?array
 {
-    $stmt = db()->prepare('SELECT * FROM products WHERE slug = ? AND deleted_at IS NULL');
+    $stmt = db()->prepare('SELECT * FROM products WHERE slug = ? AND deleted_at IS NULL AND is_disabled = 0');
     $stmt->execute([$slug]);
     $product = $stmt->fetch();
 
@@ -1393,6 +1931,12 @@ function layout(string $title, string $content, string $active = ''): void
     $metaImage = absolute_url(DEFAULT_META_IMAGE);
     $canonicalUrl = current_url();
     $basePath = public_base_path();
+    $appCssVersion = (string) filemtime(__DIR__ . '/app.css');
+    $appJsVersion = (string) filemtime(__DIR__ . '/app.js');
+    $googleMapsKey = google_maps_browser_key();
+    $mapsScript = $googleMapsKey !== ''
+        ? '<script async src="https://maps.googleapis.com/maps/api/js?key=' . rawurlencode($googleMapsKey) . '&libraries=places,routes&callback=initInexoMaps"></script>'
+        : '';
     $html = '<!DOCTYPE html>
 <html lang="es" data-base-path="' . h($basePath) . '">
 <head>
@@ -1422,14 +1966,15 @@ function layout(string $title, string $content, string $active = ''): void
   <link href="' . ASSET_BASE . '/css/normalize.css" rel="stylesheet" type="text/css">
   <link href="' . ASSET_BASE . '/css/components.css" rel="stylesheet" type="text/css">
   <link href="' . ASSET_BASE . '/css/inexo-rental---tu-partner-en-cada-obra.css" rel="stylesheet" type="text/css">
-  <link href="/app.css" rel="stylesheet" type="text/css">
+  <link href="/app.css?v=' . h($appCssVersion) . '" rel="stylesheet" type="text/css">
 </head>
 <body class="body" data-active="' . h($active) . '">
   ' . site_header(!$isAdmin, $isAdmin) . '
   ' . $content . '
   ' . site_footer() . '
   <script>window.INEXO_BASE_PATH = ' . json_encode($basePath, JSON_UNESCAPED_SLASHES) . ';</script>
-  <script src="/app.js"></script>
+  <script src="/app.js?v=' . h($appJsVersion) . '"></script>
+  ' . $mapsScript . '
 </body>
 </html>';
 
@@ -1448,6 +1993,7 @@ function site_header(bool $showNavBar = true, bool $isAdmin = false): string
     </button>
     <div class="div-block">
       <a href="/productos" class="enlace-barra-central w-inline-block"><div class="enlace-navbar">Productos</div><img src="' . ASSET_BASE . '/images/flecha-simple.png" loading="eager" width="22" alt="" class="flecha-abajo"></a>
+      <a href="/productos-oferta" class="enlace-barra-central w-inline-block"><div class="enlace-navbar">Ofertas</div><img src="' . ASSET_BASE . '/images/flecha-simple.png" loading="eager" width="22" alt="" class="flecha-abajo"></a>
       <a href="/especializacion" class="enlace-barra-central w-inline-block"><div class="enlace-navbar">Especializacion</div><img src="' . ASSET_BASE . '/images/flecha-simple.png" loading="eager" width="22" alt="" class="flecha-abajo"></a>
       <a href="/marca" class="enlace-barra-central w-inline-block"><div class="enlace-navbar">Marca</div><img src="' . ASSET_BASE . '/images/flecha-simple.png" loading="eager" width="22" alt="" class="flecha-abajo"></a>
     </div>
@@ -1474,6 +2020,9 @@ function site_header(bool $showNavBar = true, bool $isAdmin = false): string
     <div class="contendor-menu-movil">
       <a href="/productos" class="enlace-barra-central menu-movil w-inline-block">
         <div class="enlace-navbar">Productos</div><img src="' . ASSET_BASE . '/images/flecha-simple.png" loading="lazy" width="14" alt="">
+      </a>
+      <a href="/productos-oferta" class="enlace-barra-central menu-movil w-inline-block">
+        <div class="enlace-navbar">Ofertas</div><img src="' . ASSET_BASE . '/images/flecha-simple.png" loading="lazy" width="14" alt="">
       </a>
       <a href="/especializacion" class="enlace-barra-central menu-movil w-inline-block">
         <div class="enlace-navbar">Especializacion</div><img src="' . ASSET_BASE . '/images/flecha-simple.png" loading="lazy" width="14" alt="">
@@ -1512,6 +2061,7 @@ function site_footer(): string
       <div class="nav-footer">
         <div class="contenedor-ver"><div class="enlace-navbar naranja">ver</div><img src="' . ASSET_BASE . '/images/doble-chevron-footer.png" loading="lazy" width="20" alt="" class="image-3"></div>
         <a href="/productos" class="enlace-barra-central w-inline-block"><div class="enlace-navbar blanco">Productos</div></a>
+        <a href="/productos-oferta" class="enlace-barra-central w-inline-block"><div class="enlace-navbar blanco">Ofertas</div></a>
         <a href="/especializacion" class="enlace-barra-central w-inline-block"><div class="enlace-navbar blanco">Especializaciones</div></a>
         <a href="/marca" class="enlace-barra-central w-inline-block"><div class="enlace-navbar blanco">Marcas</div></a>
         <a href="/contacto" class="btn-contacto w-button">Contacto</a>
@@ -1543,21 +2093,31 @@ function site_footer(): string
 
 function product_card(array $product): string
 {
-    $image = $product['images'][0] ?? ASSET_BASE . '/images/imagen-producto-generico.avif';
+    $image = product_primary_image($product);
+    $isOffer = product_is_offer_active($product);
+    $isOrderable = product_is_orderable($product);
+    $status = !$isOrderable ? 'No disponible' : (string) ($product['status'] ?? 'En stock');
+    $price = (float) ($product['rental_monthly'] ?? 0);
+    $isLabor = (string) ($product['product_type'] ?? 'standard') === 'labor';
+    $offerCountdown = '';
+    if ($isOffer) {
+        $offerCountdown = '<div class="app-offer-badge">Oferta' . product_offer_countdown_html($product) . '</div>';
+    }
 
     return '
 <div class="w-layout-cell">
-  <article class="card-producto">
+  <article class="card-producto' . (!$isOrderable ? ' app-product-unavailable' : '') . '">
     <a href="/producto/' . h($product['slug']) . '" class="app-card-link">
+      ' . $offerCountdown . '
       <div class="titulo-producto">' . h($product['name']) . '</div>
       <div class="contenedor-imagen-producto"><img src="' . h($image) . '" loading="lazy" alt="' . h($product['name']) . '" class="imagen-producto"></div>
-      <div class="contenedor-en-stock"><div class="texto-en-stock">' . h($product['status']) . '</div></div>
+      <div class="contenedor-en-stock"><div class="texto-en-stock">' . h($status) . '</div></div>
       <div class="contendor-precio-plazo">
-        <div class="titulo-producto">Desde ' . money($product['rental_monthly']) . '</div>
-        <div class="tiempo-alquiler-por-precio-indicado">Por 28 dias</div>
+        <div class="titulo-producto">' . ($isLabor ? 'Calculo configurable' : 'Desde ' . money($price)) . '</div>
+        <div class="tiempo-alquiler-por-precio-indicado">' . ($isLabor ? 'Segun tipo de trabajo' : 'Por 28 dias') . '</div>
       </div>
     </a>
-    <a href="/producto/' . h($product['slug']) . '" class="button alquilar w-button">Alquilar</a>
+    <a href="/producto/' . h($product['slug']) . '" class="button alquilar w-button">' . ($isLabor ? 'Cotizar' : 'Alquilar') . '</a>
   </article>
 </div>';
 }
@@ -1607,6 +2167,7 @@ function home_page(): void
 {
     $featured = products('is_featured = 1', [], 5);
     $newProducts = products('is_new = 1', [], 5);
+    $offers = products("is_offer = 1 AND offer_ends_at <> '' AND (offer_starts_at = '' OR datetime(offer_starts_at) <= datetime('now')) AND datetime(offer_ends_at) >= datetime('now')", [], 5);
     $fallbackProducts = products('', [], 5);
 
     if ($featured === []) {
@@ -1624,6 +2185,7 @@ function home_page(): void
   </div>
 </section>
 ' . product_section('Productos destacados', $featured, 'productos-novedades', 'todos los destacados', null, '/productos-destacados') . '
+' . ($offers !== [] ? product_section('Ofertas exclusivas', $offers, 'productos-destacados app-offers-section', 'todas las ofertas', null, '/productos-oferta') : '') . '
 ' . product_section('Productos novedades', $newProducts, 'productos-destacados', 'todas las novedades', null, '/productos-novedades');
 
     layout('Inicio', $content, 'inicio');
@@ -1678,6 +2240,11 @@ function filtered_product_listing_page(string $kind): void
             'where' => 'is_new = 1',
             'title' => 'Productos novedades',
             'active' => 'productos-novedades',
+        ],
+        'ofertas' => [
+            'where' => "is_offer = 1 AND offer_ends_at <> '' AND (offer_starts_at = '' OR datetime(offer_starts_at) <= datetime('now')) AND datetime(offer_ends_at) >= datetime('now')",
+            'title' => 'Productos en oferta',
+            'active' => 'productos-oferta',
         ],
     };
 
@@ -1798,11 +2365,57 @@ function detail_page(string $slug): void
 
     $start = date('Y-m-d');
     $end = date('Y-m-d', strtotime('+10 days'));
+    $isOrderable = product_is_orderable($product);
+    $disabledAttr = $isOrderable ? '' : ' disabled';
+    $disabledText = $isOrderable ? '' : '<p class="app-contact-feedback is-error">Este producto no esta disponible para nuevos pedidos.</p>';
+    $offerBanner = product_is_offer_active($product)
+        ? '<div class="app-detail-offer">Oferta exclusiva' . product_offer_countdown_html($product) . '</div>'
+        : '';
+    $productImage = h($images[0]);
+    $commerceCards = '';
+    if ((string) ($product['product_type'] ?? 'standard') === 'labor') {
+        $laborTypeOptions = '';
+        foreach (labor_work_types(true) as $workType) {
+            $laborTypeOptions .= '<option value="' . (int) $workType['id'] . '"
+                data-base-price="' . h($workType['base_price']) . '"
+                data-worker-cost="' . h($workType['worker_cost']) . '"
+                data-time-cost="' . h($workType['time_cost']) . '"
+                data-area-cost-per-m2="' . h($workType['area_cost_per_m2']) . '"
+                data-time-unit="' . h($workType['time_unit']) . '"
+                data-requires-area="' . (int) $workType['requires_area'] . '">' . h($workType['name']) . '</option>';
+        }
+        $laborDisabledAttr = $laborTypeOptions === '' ? ' disabled' : $disabledAttr;
+        $laborMessage = $laborTypeOptions === ''
+            ? '<p class="app-contact-feedback is-error">No hay tipos de trabajo activos configurados en backend.</p>'
+            : '';
+        $commerceCards = '
+      <form class="app-price-card app-labor-card" data-labor-form>
+        <div><span>Mano de Obra</span><strong data-labor-total>Por calcular</strong></div>
+        ' . $laborMessage . '
+        <label>Tipo de trabajo<select name="work_type_id" required' . $laborDisabledAttr . '>' . $laborTypeOptions . '</select></label>
+        <label>Tiempo estimado<input name="time_amount" type="number" min="0.01" step="0.01" value="1" required></label>
+        <label>Cantidad de trabajadores<input name="workers" type="number" min="1" step="1" value="1" required></label>
+        <label>Metros cuadrados m²<input name="area_m2" type="number" min="0" step="0.01" value="0"></label>
+        <div class="app-labor-breakdown" data-labor-breakdown></div>
+        <button type="submit" data-product-id="' . (int) $product['id'] . '" data-product-name="' . h($product['name']) . '" data-product-url="/producto/' . h($product['slug']) . '" data-product-image="' . $productImage . '" data-price-label="Mano de Obra"' . $laborDisabledAttr . '>Agregar</button>
+      </form>';
+    } else {
+        $commerceCards = '
+      <section class="app-price-card">
+        <div><span>Precio de venta (usado)</span><strong>' . money($product['price_sale_used']) . '</strong></div>
+        <button type="button" data-add-cart data-product-id="' . (int) $product['id'] . '" data-product-name="' . h($product['name']) . '" data-product-url="/producto/' . h($product['slug']) . '" data-product-image="' . $productImage . '" data-price-label="Compra usado" data-unit-price="' . h($product['price_sale_used']) . '"' . $disabledAttr . '>Comprar</button>
+      </section>
+      <section class="app-price-card">
+        <div><span>Precio de venta (nuevo)</span><strong>' . money($product['price_sale_new']) . '</strong></div>
+        <button type="button" data-add-cart data-product-id="' . (int) $product['id'] . '" data-product-name="' . h($product['name']) . '" data-product-url="/producto/' . h($product['slug']) . '" data-product-image="' . $productImage . '" data-price-label="Compra nuevo" data-unit-price="' . h($product['price_sale_new']) . '"' . $disabledAttr . '>Comprar</button>
+      </section>';
+    }
     $content = '
 <main class="app-detail">
   <section class="app-detail-grid">
     <div class="app-detail-media">
       <div class="app-stock-badge">' . h($product['status']) . '</div>
+      ' . $offerBanner . '
       <img src="' . h($images[0]) . '" alt="' . h($product['name']) . '" class="app-main-product-image" data-main-image>
       <div class="app-thumbs">' . $thumbs . '</div>
       <article class="app-product-copy">
@@ -1813,17 +2426,11 @@ function detail_page(string $slug): void
     <aside class="app-product-panel">
       <section class="app-card app-title-card">
         <h2>' . h($product['name']) . '</h2>
-        <div class="app-code">' . h($product['code']) . '</div>
+        <div class="app-code">' . h($product['code']) . ' - ' . h(product_type_label($product)) . '</div>
       </section>
-      <section class="app-price-card">
-        <div><span>Precio de venta (usado)</span><strong>' . money($product['price_sale_used']) . '</strong></div>
-        <button type="button" data-add-cart data-product-id="' . (int) $product['id'] . '" data-product-name="' . h($product['name']) . '" data-product-url="/producto/' . h($product['slug']) . '" data-price-label="Compra usado" data-unit-price="' . h($product['price_sale_used']) . '">Comprar</button>
-      </section>
-      <section class="app-price-card">
-        <div><span>Precio de venta (nuevo)</span><strong>' . money($product['price_sale_new']) . '</strong></div>
-        <button type="button" data-add-cart data-product-id="' . (int) $product['id'] . '" data-product-name="' . h($product['name']) . '" data-product-url="/producto/' . h($product['slug']) . '" data-price-label="Compra nuevo" data-unit-price="' . h($product['price_sale_new']) . '">Comprar</button>
-      </section>
-      <form class="app-rental-card" data-reservation-form>
+      ' . $disabledText . '
+      ' . $commerceCards . '
+      <form class="app-rental-card' . ((string) ($product['product_type'] ?? 'standard') === 'labor' ? ' app-hidden' : '') . '" data-reservation-form>
         <input type="hidden" name="product_id" value="' . (int) $product['id'] . '">
         <div class="app-panel-heading">Configurar alquiler</div>
         <div class="app-rental-body">
@@ -1843,7 +2450,7 @@ function detail_page(string $slug): void
             <option value="">Por favor elija una ciudad</option>
             ' . $cities . '
           </select>
-          <button class="app-reserve-button" type="submit" data-product-id="' . (int) $product['id'] . '" data-product-name="' . h($product['name']) . '" data-product-url="/producto/' . h($product['slug']) . '">Reserve equipo ahora</button>
+          <button class="app-reserve-button" type="submit" data-product-id="' . (int) $product['id'] . '" data-product-name="' . h($product['name']) . '" data-product-url="/producto/' . h($product['slug']) . '" data-product-image="' . $productImage . '"' . $disabledAttr . '>Reserve equipo ahora</button>
           <p class="app-disclaimer"><strong>Importante:</strong> Esta solicitud no garantiza la disponibilidad inmediata del equipo. Si otra empresa lo reservo minutos antes, nos pondremos en contacto con usted lo antes posible para confirmar una nueva fecha o una alternativa disponible.</p>
           <div class="app-form-message" data-form-message></div>
         </div>
@@ -1879,6 +2486,11 @@ function cart_page(): void
 function checkout_page(): void
 {
     global $dominicanCities;
+    $freight = freight_settings();
+    $truckOptions = '';
+    foreach (freight_truck_types(true) as $truckType) {
+        $truckOptions .= '<option value="' . (int) $truckType['id'] . '" data-cost-per-km="' . h($truckType['cost_per_km']) . '">' . h($truckType['name']) . ' - ' . money($truckType['cost_per_km']) . '/km</option>';
+    }
 
     $cities = '';
     foreach ($dominicanCities as $city) {
@@ -1905,8 +2517,28 @@ function checkout_page(): void
       <label>Repetir contrasena<input name="password_confirm" type="password" autocomplete="new-password" minlength="8" required></label>
       <label>Telefono<input name="phone" required></label>
       <label>Empresa<input name="company"></label>
-      <label class="app-form-wide">Direccion de entrega<input name="address" required></label>
-      <label>Ciudad<select name="city" required><option value="">Seleccionar ciudad</option>' . $cities . '</select></label>
+      <h2 class="app-form-wide">Datos fiscales</h2>
+      <label>Razon social<input name="fiscal_name" required></label>
+      <label>R.N.C.<input name="fiscal_id" required></label>
+      <label class="app-form-wide">Direccion fiscal<input name="fiscal_address"></label>
+      <h2 class="app-form-wide">Entrega</h2>
+      <label>Tipo de entrega<select name="delivery_type" required><option value="">Seleccionar tipo</option><option value="empresa">Entrega en Empresa</option><option value="obra">Entrega en Obra</option></select></label>
+      <label>Ciudad<select name="city" data-delivery-city required><option value="">Seleccionar ciudad</option>' . $cities . '</select></label>
+      <label class="app-hidden" data-santo-domingo-zone>Zona<input name="delivery_zone" data-delivery-zone></label>
+      <label class="app-form-wide">Direccion de entrega<input name="address" data-delivery-address autocomplete="off" placeholder="Seleccionar con Google Maps / Places" required></label>
+      <label>Nombre recibe<input name="delivery_contact_first_name" required></label>
+      <label>Apellido recibe<input name="delivery_contact_last_name" required></label>
+      <label>Telefono de oficina<input name="delivery_office_phone" required></label>
+      <label>Movil responsable<input name="delivery_mobile_phone" required></label>
+      <label class="app-form-wide">Referencia de entrega<textarea name="delivery_reference" rows="3" placeholder="Indicaciones, porteria, horario, responsable"></textarea></label>
+      <input name="delivery_place_id" type="hidden">
+      <input name="delivery_lat" type="hidden">
+      <input name="delivery_lng" type="hidden">
+      <div class="app-form-wide app-freight-box" data-freight-calculator data-origin-address="' . h($freight['origin_address']) . '" data-origin-lat="' . h($freight['origin_lat']) . '" data-origin-lng="' . h($freight['origin_lng']) . '" data-round-trip-factor="' . h($freight['round_trip_factor']) . '">
+        <label>Tipo de camion<select name="freight_truck_type_id" data-truck-type required><option value="">Seleccionar camion</option>' . $truckOptions . '</select></label>
+        <label>Distancia ida estimada en km<input name="delivery_distance_km" type="number" min="0" step="0.01" data-distance-km placeholder="Se completa con Google Maps o manualmente"></label>
+        <div class="app-freight-summary" data-freight-summary>Flete por confirmar</div>
+      </div>
       <div class="app-form-actions">
         <button class="btn-contacto w-button" type="submit">Crear cuenta y enviar pedido</button>
         <div class="app-form-message" data-checkout-message></div>
@@ -2227,7 +2859,7 @@ function admin_dashboard_page(): void
 function admin_products_page(): void
 {
     $rows = '';
-    foreach (products() as $product) {
+    foreach (products('', [], null, false, true) as $product) {
         $thumbnail = admin_product_thumbnail($product);
         $rows .= '
 <tr>
@@ -2240,6 +2872,9 @@ function admin_products_page(): void
   <td>' . h($product['brand']) . '</td>
   <td>' . h($product['specialization']) . '</td>
   <td>' . money($product['rental_monthly']) . '</td>
+  <td>' . (product_has_stock($product) ? 'Si' : 'No') . '</td>
+  <td>' . ((int) ($product['is_offer'] ?? 0) === 1 ? 'Si' : 'No') . '</td>
+  <td>' . ((int) ($product['is_disabled'] ?? 0) === 1 ? 'Si' : 'No') . '</td>
   <td>' . ((int) $product['is_featured'] === 1 ? 'Si' : 'No') . '</td>
   <td>' . ((int) $product['is_new'] === 1 ? 'Si' : 'No') . '</td>
   <td class="app-admin-actions">
@@ -2264,8 +2899,8 @@ function admin_products_page(): void
   ' . admin_nav('productos') . '
   <div class="app-admin-card">
     <table class="app-admin-table">
-      <thead><tr><th>Producto</th><th>Marca</th><th>Especializacion</th><th>Alquiler mensual</th><th>Destacado</th><th>Novedad</th><th></th></tr></thead>
-      <tbody>' . ($rows ?: '<tr><td colspan="7">Todavia no hay productos activos.</td></tr>') . '</tbody>
+      <thead><tr><th>Producto</th><th>Marca</th><th>Especializacion</th><th>Alquiler mensual</th><th>Stock</th><th>Oferta</th><th>Deshabilitado</th><th>Destacado</th><th>Novedad</th><th></th></tr></thead>
+      <tbody>' . ($rows ?: '<tr><td colspan="10">Todavia no hay productos activos.</td></tr>') . '</tbody>
     </table>
   </div>
 </main>', 'admin');
@@ -2274,7 +2909,7 @@ function admin_products_page(): void
 function admin_product_trash_page(): void
 {
     $rows = '';
-    foreach (products('deleted_at IS NOT NULL', [], null, true) as $product) {
+    foreach (products('deleted_at IS NOT NULL', [], null, true, true) as $product) {
         $thumbnail = admin_product_thumbnail($product);
         $rows .= '
 <tr>
@@ -2470,6 +3105,8 @@ function admin_order_detail_page(int $orderId): void
 
     $items = order_items($orderId);
     $snapshot = order_customer_snapshot($order);
+    $fiscalSnapshot = json_decode((string) ($order['fiscal_snapshot'] ?? '{}'), true) ?: [];
+    $deliverySnapshot = json_decode((string) ($order['delivery_snapshot'] ?? '{}'), true) ?: [];
     $itemRows = '';
     foreach ($items as $item) {
         $productName = h($item['product_name']);
@@ -2484,10 +3121,16 @@ function admin_order_detail_page(int $orderId): void
             trim((string) ($item['end_date'] ?? '')) !== '' ? 'Hasta: ' . (string) $item['end_date'] : '',
             trim((string) ($item['city'] ?? '')) !== '' ? 'Ciudad: ' . (string) $item['city'] : '',
         ]);
+        $laborLines = labor_detail_lines(order_item_details($item));
+        $detailText = implode(' - ', array_merge($details, $laborLines));
+        $thumbnail = trim((string) ($item['image_url'] ?? ''));
+        $thumbnailHtml = $thumbnail !== '' ? '<img src="' . h($thumbnail) . '" alt="" class="app-admin-product-thumb">' : '';
         $itemRows .= '
         <tr>
-          <td>' . $productLabel . '<span>' . h(implode(' - ', $details)) . '</span></td>
+          <td><div class="app-admin-product-cell">' . $thumbnailHtml . '<div>' . $productLabel . '<span>' . h($detailText) . '</span></div></div></td>
           <td>' . (int) $item['quantity'] . '</td>
+          <td>' . money($item['unit_price'] ?? 0) . '</td>
+          <td>' . money($item['subtotal'] ?? 0) . '</td>
         </tr>';
     }
 
@@ -2505,6 +3148,63 @@ function admin_order_detail_page(int $orderId): void
         if ($value !== '') {
             $snapshotRows .= '<tr><th>' . h($label) . '</th><td>' . h($value) . '</td></tr>';
         }
+    }
+    $fiscalRows = '';
+    foreach ([
+        'fiscal_name' => 'Razon social',
+        'fiscal_id' => 'R.N.C.',
+        'fiscal_address' => 'Direccion fiscal',
+    ] as $key => $label) {
+        $value = trim((string) ($fiscalSnapshot[$key] ?? ''));
+        if ($value !== '') {
+            $fiscalRows .= '<tr><th>' . h($label) . '</th><td>' . h($value) . '</td></tr>';
+        }
+    }
+    $deliveryRows = '';
+    foreach ([
+        'type_label' => 'Tipo de entrega',
+        'city' => 'Ciudad',
+        'zone' => 'Zona',
+        'address' => 'Direccion',
+        'contact_name' => 'Contacto que recibe',
+        'office_phone' => 'Telefono oficina',
+        'mobile_phone' => 'Movil responsable',
+        'reference' => 'Referencia',
+        'place_id' => 'Google Place ID',
+        'lat' => 'Latitud',
+        'lng' => 'Longitud',
+        'origin_address' => 'Direccion base usada',
+        'origin_lat' => 'Latitud base',
+        'origin_lng' => 'Longitud base',
+        'origin_place_id' => 'Place ID base',
+        'freight_truck_type_name' => 'Camion seleccionado',
+        'freight_cost_per_km' => 'Costo por KM usado',
+        'distance_km_one_way' => 'Km ida',
+        'distance_km_round_trip' => 'Km ida y vuelta',
+        'freight_total' => 'Total flete calculado',
+    ] as $key => $label) {
+        $value = trim((string) ($deliverySnapshot[$key] ?? ''));
+        if ($value !== '') {
+            if (in_array($key, ['freight_cost_per_km', 'freight_total'], true)) {
+                $value = money((float) $value);
+            }
+            $deliveryRows .= '<tr><th>' . h($label) . '</th><td>' . h($value) . '</td></tr>';
+        }
+    }
+    $truckName = trim((string) ($deliverySnapshot['freight_truck_type_name'] ?? ''));
+    $roundTripKm = trim((string) ($deliverySnapshot['distance_km_round_trip'] ?? ''));
+    if ((float) ($order['freight_amount'] ?? 0) > 0 || $truckName !== '') {
+        $freightDetails = array_filter([
+            $roundTripKm !== '' ? 'Distancia total: ' . $roundTripKm . ' km' : '',
+            isset($deliverySnapshot['freight_cost_per_km']) ? 'Costo por KM: ' . money($deliverySnapshot['freight_cost_per_km']) : '',
+        ]);
+        $itemRows .= '
+        <tr>
+          <td><strong>Flete ida y vuelta' . ($truckName !== '' ? ' - ' . h($truckName) : '') . '</strong><span>' . h(implode(' - ', $freightDetails)) . '</span></td>
+          <td>1</td>
+          <td>' . money($order['freight_amount'] ?? 0) . '</td>
+          <td>' . money($order['freight_amount'] ?? 0) . '</td>
+        </tr>';
     }
 
     $defaultSubject = 'Actualizacion de tu pedido #' . (int) $order['id'] . ' - Inexo Rental';
@@ -2535,12 +3235,28 @@ function admin_order_detail_page(int $orderId): void
       </div>
       <h2>Items del pedido</h2>
       <table class="app-admin-table app-order-items-table">
-        <thead><tr><th>Producto</th><th>Cantidad</th></tr></thead>
-        <tbody>' . ($itemRows ?: '<tr><td colspan="2">Este pedido no tiene items.</td></tr>') . '</tbody>
+        <thead><tr><th>Producto</th><th>Cantidad</th><th>Unitario</th><th>Subtotal</th></tr></thead>
+        <tbody>' . ($itemRows ?: '<tr><td colspan="4">Este pedido no tiene items.</td></tr>') . '</tbody>
+      </table>
+      <h2>Totales</h2>
+      <table class="app-order-meta-table">
+        <tbody>
+          <tr><th>Subtotal</th><td>' . money($order['subtotal_amount'] ?? 0) . '</td></tr>
+          <tr><th>Flete ida y vuelta</th><td>' . money($order['freight_amount'] ?? 0) . '</td></tr>
+          <tr><th>Total proforma</th><td><strong>' . money($order['total_amount'] ?? 0) . '</strong></td></tr>
+        </tbody>
       </table>
       <h2>Datos del checkout</h2>
       <table class="app-order-meta-table">
         <tbody>' . ($snapshotRows ?: '<tr><td>No hay datos adicionales guardados.</td></tr>') . '</tbody>
+      </table>
+      <h2>Datos fiscales</h2>
+      <table class="app-order-meta-table">
+        <tbody>' . ($fiscalRows ?: '<tr><td>No hay datos fiscales guardados.</td></tr>') . '</tbody>
+      </table>
+      <h2>Entrega</h2>
+      <table class="app-order-meta-table">
+        <tbody>' . ($deliveryRows ?: '<tr><td>No hay datos de entrega guardados.</td></tr>') . '</tbody>
       </table>
     </div>
     <aside class="app-order-actions">
@@ -2555,6 +3271,12 @@ function admin_order_detail_page(int $orderId): void
         <label class="app-form-wide">Asunto<input name="subject" value="' . h($defaultSubject) . '" required></label>
         <label class="app-form-wide">Mensaje<textarea name="message" rows="7" required>' . h($defaultMessage) . '</textarea></label>
         <div class="app-form-actions"><button class="btn-contacto w-button" type="submit">Enviar email</button></div>
+      </form>
+      <form action="/admin/pedidos/' . (int) $order['id'] . '/proforma-email" method="post" class="app-admin-form app-order-action-form">
+        <h2 class="app-form-wide">Proforma PDF</h2>
+        <p class="app-form-wide"><a href="/admin/pedidos/' . (int) $order['id'] . '/proforma.pdf" target="_blank" rel="noopener">Descargar proforma PDF</a></p>
+        <p class="app-form-wide">Ultimo envio: ' . h((string) ($order['proforma_sent_at'] ?? '') ?: 'sin enviar') . '</p>
+        <div class="app-form-actions"><button class="btn-contacto w-button" type="submit">Enviar proforma PDF</button></div>
       </form>
     </aside>
   </section>
@@ -2585,6 +3307,354 @@ function send_admin_order_email(int $orderId): void
     $sent = send_order_customer_email($order, order_items($orderId), $subject, $message);
 
     redirect_to('/admin/pedidos/' . $orderId . '?status=' . ($sent ? 'sent' : 'mail_failed'));
+}
+
+function proforma_lines(array $order, array $items): array
+{
+    $customer = order_customer_snapshot($order);
+    $fiscal = json_decode((string) ($order['fiscal_snapshot'] ?? '{}'), true) ?: [];
+    $delivery = json_decode((string) ($order['delivery_snapshot'] ?? '{}'), true) ?: [];
+    $lines = [
+        'INEXO RENTAL',
+        'PROFORMA #' . (int) $order['id'],
+        'Fecha: ' . (string) ($order['created_at'] ?? date('Y-m-d H:i:s')),
+        '',
+        'CLIENTE',
+        'Nombre: ' . (string) ($customer['name'] ?? $order['name'] ?? ''),
+        'Email: ' . (string) ($order['email'] ?? $customer['email'] ?? ''),
+        'Telefono: ' . (string) ($customer['phone'] ?? ''),
+        'Empresa: ' . (string) ($customer['company'] ?? ''),
+        '',
+        'DATOS FISCALES',
+        'Razon social: ' . (string) ($fiscal['fiscal_name'] ?? ''),
+        'R.N.C.: ' . (string) ($fiscal['fiscal_id'] ?? ''),
+        'Direccion fiscal: ' . (string) ($fiscal['fiscal_address'] ?? ''),
+        '',
+        'ENTREGA',
+        'Tipo: ' . (string) ($delivery['type_label'] ?? ''),
+        'Ciudad: ' . (string) ($delivery['city'] ?? $customer['city'] ?? ''),
+        'Zona: ' . (string) ($delivery['zone'] ?? ''),
+        'Direccion: ' . (string) ($delivery['address'] ?? $customer['address'] ?? ''),
+        'Contacto: ' . (string) ($delivery['contact_name'] ?? ''),
+        'Telefono oficina: ' . (string) ($delivery['office_phone'] ?? ''),
+        'Movil responsable: ' . (string) ($delivery['mobile_phone'] ?? ''),
+        'Referencia: ' . (string) ($delivery['reference'] ?? ''),
+        'Place ID: ' . (string) ($delivery['place_id'] ?? ''),
+        'Lat/Lng: ' . (string) ($delivery['lat'] ?? '') . ', ' . (string) ($delivery['lng'] ?? ''),
+        'Direccion base usada: ' . (string) ($delivery['origin_address'] ?? ''),
+        'Base Lat/Lng: ' . (string) ($delivery['origin_lat'] ?? '') . ', ' . (string) ($delivery['origin_lng'] ?? ''),
+        'Base Place ID: ' . (string) ($delivery['origin_place_id'] ?? ''),
+        'Camion: ' . (string) ($delivery['freight_truck_type_name'] ?? ''),
+        'Km ida: ' . (string) ($delivery['distance_km_one_way'] ?? ''),
+        'Km ida y vuelta: ' . (string) ($delivery['distance_km_round_trip'] ?? ''),
+        'Costo por KM: ' . (isset($delivery['freight_cost_per_km']) ? money($delivery['freight_cost_per_km']) : ''),
+        '',
+        'ITEMS',
+    ];
+    foreach ($items as $item) {
+        $details = array_filter([
+            order_mode_label((string) ($item['mode'] ?? '')),
+            trim((string) ($item['price_label'] ?? '')),
+            trim((string) ($item['rental_plan'] ?? '')),
+            trim((string) ($item['start_date'] ?? '')) !== '' ? (string) $item['start_date'] . ' a ' . (string) ($item['end_date'] ?? '') : '',
+        ]);
+        $lines[] = (int) $item['quantity'] . ' x ' . (string) $item['product_name'] . ' - ' . implode(' / ', $details);
+        $lines[] = 'Unitario ' . money($item['unit_price'] ?? 0) . ' - Subtotal ' . money($item['subtotal'] ?? 0);
+        foreach (labor_detail_lines(order_item_details($item)) as $laborLine) {
+            $lines[] = '  ' . $laborLine;
+        }
+    }
+    $truckName = trim((string) ($delivery['freight_truck_type_name'] ?? ''));
+    if ((float) ($order['freight_amount'] ?? 0) > 0 || $truckName !== '') {
+        $lines[] = '1 x Flete ida y vuelta' . ($truckName !== '' ? ' - ' . $truckName : '');
+        $lines[] = 'Distancia total: ' . (string) ($delivery['distance_km_round_trip'] ?? '') . ' km - Costo por KM: ' . (isset($delivery['freight_cost_per_km']) ? money($delivery['freight_cost_per_km']) : '') . ' - Total flete: ' . money($order['freight_amount'] ?? 0);
+    }
+    $lines[] = '';
+    $lines[] = 'Subtotal: ' . money($order['subtotal_amount'] ?? 0);
+    $lines[] = 'Flete ida y vuelta: ' . money($order['freight_amount'] ?? 0);
+    $lines[] = 'TOTAL: ' . money($order['total_amount'] ?? 0);
+    $lines[] = '';
+    $lines[] = 'Validez y disponibilidad sujetas a confirmacion comercial de Inexo Rental.';
+
+    return $lines;
+}
+
+function pdf_text_escape(string $text): string
+{
+    $text = iconv('UTF-8', 'ASCII//TRANSLIT', $text) ?: $text;
+
+    return str_replace(['\\', '(', ')'], ['\\\\', '\\(', '\\)'], $text);
+}
+
+function simple_pdf_bytes(array $lines): string
+{
+    $wrappedLines = [];
+    foreach ($lines as $line) {
+        $text = iconv('UTF-8', 'ASCII//TRANSLIT', (string) $line) ?: (string) $line;
+        if ($text === '') {
+            $wrappedLines[] = '';
+            continue;
+        }
+        foreach (explode("\n", wordwrap($text, 92, "\n", true)) as $part) {
+            $wrappedLines[] = $part;
+        }
+    }
+    $pages = array_chunk($wrappedLines, 50);
+    if ($pages === []) {
+        $pages = [[]];
+    }
+
+    $objects = [];
+    $objects[] = "<< /Type /Catalog /Pages 2 0 R >>";
+    $objects[] = '';
+    $fontObjectNumber = 3 + (count($pages) * 2);
+    $kids = [];
+    foreach ($pages as $index => $pageLines) {
+        $pageObjectNumber = 3 + ($index * 2);
+        $contentObjectNumber = $pageObjectNumber + 1;
+        $kids[] = $pageObjectNumber . ' 0 R';
+        $content = "BT\n/F1 11 Tf\n50 790 Td\n14 TL\n";
+        foreach ($pageLines as $line) {
+            $content .= '(' . pdf_text_escape((string) $line) . ") Tj\nT*\n";
+        }
+        $content .= "ET\n";
+        $objects[] = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 842] /Resources << /Font << /F1 " . $fontObjectNumber . " 0 R >> >> /Contents " . $contentObjectNumber . " 0 R >>";
+        $objects[] = "<< /Length " . strlen($content) . " >>\nstream\n" . $content . "endstream";
+    }
+    $objects[1] = "<< /Type /Pages /Kids [" . implode(' ', $kids) . "] /Count " . count($pages) . " >>";
+    $objects[] = "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>";
+
+    $pdf = "%PDF-1.4\n";
+    $offsets = [0];
+    foreach ($objects as $index => $object) {
+        $offsets[] = strlen($pdf);
+        $number = $index + 1;
+        $pdf .= $number . " 0 obj\n" . $object . "\nendobj\n";
+    }
+    $xref = strlen($pdf);
+    $pdf .= "xref\n0 " . (count($objects) + 1) . "\n0000000000 65535 f \n";
+    for ($i = 1; $i <= count($objects); $i++) {
+        $pdf .= sprintf("%010d 00000 n \n", $offsets[$i]);
+    }
+    $pdf .= "trailer\n<< /Size " . (count($objects) + 1) . " /Root 1 0 R >>\nstartxref\n" . $xref . "\n%%EOF\n";
+
+    return $pdf;
+}
+
+function order_proforma_pdf_bytes(array $order, array $items): string
+{
+    return simple_pdf_bytes(proforma_lines($order, $items));
+}
+
+function output_order_proforma_pdf(int $orderId): void
+{
+    $order = order_by_id($orderId);
+    if (!$order) {
+        not_found();
+        return;
+    }
+    $pdf = order_proforma_pdf_bytes($order, order_items($orderId));
+    header('Content-Type: application/pdf');
+    header('Content-Disposition: inline; filename="proforma-' . (int) $orderId . '.pdf"');
+    header('Content-Length: ' . strlen($pdf));
+    echo $pdf;
+}
+
+function send_order_proforma_to_customer(int $orderId): bool
+{
+    $order = order_by_id($orderId);
+    if (!$order) {
+        return false;
+    }
+    $recipient = (string) ($order['email'] ?? '');
+    $pdf = order_proforma_pdf_bytes($order, order_items($orderId));
+    $body = '<p>Hola' . (trim((string) ($order['name'] ?? '')) !== '' ? ' ' . h($order['name']) : '') . ',</p><p>Adjuntamos la proforma PDF de tu pedido #' . (int) $orderId . '.</p><p>La disponibilidad queda sujeta a confirmacion del equipo comercial.</p>';
+    $sent = send_email($recipient, 'Proforma pedido #' . (int) $orderId . ' - Inexo Rental', $body, 'text/html; charset=UTF-8', contact_recipient_email(), [[
+        'filename' => 'proforma-' . (int) $orderId . '.pdf',
+        'content_type' => 'application/pdf',
+        'data' => $pdf,
+    ]]);
+    if ($sent) {
+        db()->prepare("UPDATE orders SET proforma_sent_at = datetime('now') WHERE id = ?")->execute([$orderId]);
+    }
+
+    return $sent;
+}
+
+function send_order_proforma_email(int $orderId): void
+{
+    if (!order_by_id($orderId)) {
+        not_found();
+        return;
+    }
+
+    $sent = send_order_proforma_to_customer($orderId);
+    redirect_to('/admin/pedidos/' . $orderId . '?status=' . ($sent ? 'sent' : 'mail_failed'));
+}
+
+function admin_settings_page(): void
+{
+    $savedNotice = (string) ($_GET['guardado'] ?? '') === '1'
+        ? '<div class="app-contact-feedback is-success">Configuracion guardada.</div>'
+        : '';
+    $values = [
+        'company_origin_address' => app_setting('company_origin_address'),
+        'company_origin_lat' => app_setting('company_origin_lat'),
+        'company_origin_lng' => app_setting('company_origin_lng'),
+        'company_origin_place_id' => app_setting('company_origin_place_id'),
+        'freight_round_trip_factor' => app_setting('freight_round_trip_factor', (string) DEFAULT_FREIGHT_ROUND_TRIP_FACTOR),
+        'google_maps_browser_key' => app_setting('google_maps_browser_key'),
+    ];
+    $truckRows = '';
+    foreach (freight_truck_types(false) as $truckType) {
+        $truckId = (int) $truckType['id'];
+        $truckRows .= '
+      <tr>
+        <td><input name="truck_types[' . $truckId . '][name]" value="' . h($truckType['name']) . '" required></td>
+        <td><input name="truck_types[' . $truckId . '][cost_per_km]" type="number" step="0.01" min="0" value="' . h($truckType['cost_per_km']) . '" required></td>
+        <td><label class="app-check"><input type="checkbox" name="truck_types[' . $truckId . '][is_active]" value="1" ' . ((int) $truckType['is_active'] === 1 ? 'checked' : '') . '> Activo</label></td>
+      </tr>';
+    }
+    $laborRows = '';
+    foreach (labor_work_types(false) as $workType) {
+        $workTypeId = (int) $workType['id'];
+        $laborRows .= '
+      <tr>
+        <td><input name="labor_work_types[' . $workTypeId . '][name]" value="' . h($workType['name']) . '" required></td>
+        <td><input name="labor_work_types[' . $workTypeId . '][base_price]" type="number" step="0.01" min="0" value="' . h($workType['base_price']) . '"></td>
+        <td><input name="labor_work_types[' . $workTypeId . '][worker_cost]" type="number" step="0.01" min="0" value="' . h($workType['worker_cost']) . '"></td>
+        <td><input name="labor_work_types[' . $workTypeId . '][time_cost]" type="number" step="0.01" min="0" value="' . h($workType['time_cost']) . '"></td>
+        <td><input name="labor_work_types[' . $workTypeId . '][area_cost_per_m2]" type="number" step="0.01" min="0" value="' . h($workType['area_cost_per_m2']) . '"></td>
+        <td><select name="labor_work_types[' . $workTypeId . '][time_unit]">' . labor_time_unit_options((string) $workType['time_unit']) . '</select></td>
+        <td><label class="app-check"><input type="checkbox" name="labor_work_types[' . $workTypeId . '][requires_area]" value="1" ' . ((int) $workType['requires_area'] === 1 ? 'checked' : '') . '> Si</label></td>
+        <td><label class="app-check"><input type="checkbox" name="labor_work_types[' . $workTypeId . '][is_active]" value="1" ' . ((int) $workType['is_active'] === 1 ? 'checked' : '') . '> Activo</label></td>
+      </tr>';
+    }
+
+    layout('Configuracion', '
+<main class="app-admin-shell">
+  <div class="app-admin-header"><div><h1>Configuracion comercial</h1></div></div>
+  ' . admin_nav('configuracion') . '
+  <form action="/admin/configuracion" method="post" class="app-admin-form">
+    ' . $savedNotice . '
+    <h2 class="app-form-wide">Direccion base de Inexo</h2>
+    <label class="app-form-wide">Direccion textual<input name="company_origin_address" value="' . h($values['company_origin_address']) . '" data-origin-address-input autocomplete="off" placeholder="Sucursal, deposito o base operativa"></label>
+    <label>Latitud<input name="company_origin_lat" type="number" step="0.0000001" value="' . h($values['company_origin_lat']) . '" data-origin-lat-input></label>
+    <label>Longitud<input name="company_origin_lng" type="number" step="0.0000001" value="' . h($values['company_origin_lng']) . '" data-origin-lng-input></label>
+    <label class="app-form-wide">Google Place ID origen<input name="company_origin_place_id" value="' . h($values['company_origin_place_id']) . '" data-origin-place-id-input placeholder="Opcional"></label>
+    <h2 class="app-form-wide">Tipos de camion</h2>
+    <div class="app-form-wide app-admin-card app-inline-table-card">
+      <table class="app-admin-table">
+        <thead><tr><th>Nombre</th><th>Costo por KM</th><th>Estado</th></tr></thead>
+        <tbody>' . $truckRows . '</tbody>
+      </table>
+    </div>
+    <label>Factor ida y vuelta<input name="freight_round_trip_factor" type="number" step="0.01" value="' . h($values['freight_round_trip_factor']) . '"></label>
+    <label class="app-form-wide">Google Maps browser key<input name="google_maps_browser_key" value="' . h($values['google_maps_browser_key']) . '" placeholder="Opcional; tambien se puede usar INEXO_GOOGLE_MAPS_BROWSER_KEY"></label>
+    <h2 class="app-form-wide">Mano de Obra</h2>
+    <p class="app-form-wide app-admin-help">Formula centralizada: ' . h(labor_calculation_formula_label()) . '. El checkout recalcula con estos valores del backend antes de guardar el pedido.</p>
+    <div class="app-form-wide app-admin-card app-inline-table-card">
+      <table class="app-admin-table">
+        <thead><tr><th>Tipo</th><th>Base</th><th>Costo trabajador</th><th>Costo tiempo</th><th>Costo m²</th><th>Unidad</th><th>Requiere m²</th><th>Estado</th></tr></thead>
+        <tbody>' . ($laborRows ?: '<tr><td colspan="8">Todavia no hay tipos de trabajo.</td></tr>') . '</tbody>
+      </table>
+    </div>
+    <h3 class="app-form-wide">Agregar tipo de trabajo</h3>
+    <label>Nombre<input name="new_labor_work_type[name]" placeholder="Ej. Instalacion"></label>
+    <label>Precio base<input name="new_labor_work_type[base_price]" type="number" step="0.01" min="0" value="0"></label>
+    <label>Costo trabajador<input name="new_labor_work_type[worker_cost]" type="number" step="0.01" min="0" value="0"></label>
+    <label>Costo tiempo<input name="new_labor_work_type[time_cost]" type="number" step="0.01" min="0" value="0"></label>
+    <label>Costo m²<input name="new_labor_work_type[area_cost_per_m2]" type="number" step="0.01" min="0" value="0"></label>
+    <label>Unidad tiempo<select name="new_labor_work_type[time_unit]">' . labor_time_unit_options('dia') . '</select></label>
+    <label class="app-check"><input type="checkbox" name="new_labor_work_type[requires_area]" value="1"> Requiere m²</label>
+    <div class="app-form-actions"><button class="btn-contacto w-button" type="submit">Guardar configuracion</button></div>
+  </form>
+</main>', 'admin');
+}
+
+function save_admin_settings(): void
+{
+    $allowed = array_keys(app_setting_defaults());
+    $stmt = db()->prepare('INSERT INTO app_settings (name, value) VALUES (?, ?) ON CONFLICT(name) DO UPDATE SET value = excluded.value');
+    foreach ($allowed as $name) {
+        $value = trim((string) ($_POST[$name] ?? ''));
+        if (in_array($name, ['freight_base_fee', 'freight_per_km', 'freight_min_fee', 'freight_round_trip_factor'], true)) {
+            $number = (float) $value;
+            if ($name === 'freight_round_trip_factor' && $number <= 0) {
+                $number = DEFAULT_FREIGHT_ROUND_TRIP_FACTOR;
+            }
+            $value = (string) $number;
+        }
+        $stmt->execute([$name, $value]);
+    }
+    $postedTruckTypes = $_POST['truck_types'] ?? [];
+    if (is_array($postedTruckTypes)) {
+        $truckStmt = db()->prepare('UPDATE freight_truck_types SET name = ?, cost_per_km = ?, is_active = ? WHERE id = ?');
+        foreach (freight_truck_types(false) as $truckType) {
+            $truckId = (int) $truckType['id'];
+            $posted = $postedTruckTypes[$truckId] ?? [];
+            if (!is_array($posted)) {
+                continue;
+            }
+            $name = trim((string) ($posted['name'] ?? '')) ?: (string) $truckType['name'];
+            $costPerKm = max(0.0, (float) ($posted['cost_per_km'] ?? 0));
+            $isActive = isset($posted['is_active']) ? 1 : 0;
+            $truckStmt->execute([$name, $costPerKm, $isActive, $truckId]);
+        }
+    }
+    $postedLaborTypes = $_POST['labor_work_types'] ?? [];
+    if (is_array($postedLaborTypes)) {
+        $laborStmt = db()->prepare(
+            'UPDATE labor_work_types SET name = ?, slug = ?, base_price = ?, worker_cost = ?, time_cost = ?, area_cost_per_m2 = ?, time_unit = ?, requires_area = ?, is_active = ? WHERE id = ?'
+        );
+        foreach (labor_work_types(false) as $workType) {
+            $workTypeId = (int) $workType['id'];
+            $posted = $postedLaborTypes[$workTypeId] ?? [];
+            if (!is_array($posted)) {
+                continue;
+            }
+            $name = trim((string) ($posted['name'] ?? '')) ?: (string) $workType['name'];
+            $timeUnit = in_array((string) ($posted['time_unit'] ?? ''), ['hora', 'dia', 'semana', 'unidad'], true)
+                ? (string) $posted['time_unit']
+                : 'dia';
+            $laborStmt->execute([
+                $name,
+                slugify($name),
+                max(0.0, (float) ($posted['base_price'] ?? 0)),
+                max(0.0, (float) ($posted['worker_cost'] ?? 0)),
+                max(0.0, (float) ($posted['time_cost'] ?? 0)),
+                max(0.0, (float) ($posted['area_cost_per_m2'] ?? 0)),
+                $timeUnit,
+                isset($posted['requires_area']) ? 1 : 0,
+                isset($posted['is_active']) ? 1 : 0,
+                $workTypeId,
+            ]);
+        }
+    }
+    $newLaborType = $_POST['new_labor_work_type'] ?? [];
+    if (is_array($newLaborType)) {
+        $name = trim((string) ($newLaborType['name'] ?? ''));
+        if ($name !== '') {
+            $timeUnit = in_array((string) ($newLaborType['time_unit'] ?? ''), ['hora', 'dia', 'semana', 'unidad'], true)
+                ? (string) $newLaborType['time_unit']
+                : 'dia';
+            db()->prepare(
+                'INSERT OR IGNORE INTO labor_work_types (name, slug, base_price, worker_cost, time_cost, area_cost_per_m2, time_unit, requires_area, is_active, sort_order) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?)'
+            )->execute([
+                $name,
+                slugify($name),
+                max(0.0, (float) ($newLaborType['base_price'] ?? 0)),
+                max(0.0, (float) ($newLaborType['worker_cost'] ?? 0)),
+                max(0.0, (float) ($newLaborType['time_cost'] ?? 0)),
+                max(0.0, (float) ($newLaborType['area_cost_per_m2'] ?? 0)),
+                $timeUnit,
+                isset($newLaborType['requires_area']) ? 1 : 0,
+                count(labor_work_types(false)) * 10 + 10,
+            ]);
+        }
+    }
+
+    redirect_to('/admin/configuracion?guardado=1');
 }
 
 function admin_contact_page(): void
@@ -2723,6 +3793,16 @@ function product_form(?array $product = null): void
         'specs' => [],
         'is_featured' => 1,
         'is_new' => 1,
+        'has_stock' => 1,
+        'stock_quantity' => 1,
+        'is_disabled' => 0,
+        'is_offer' => 0,
+        'offer_starts_at' => '',
+        'offer_ends_at' => '',
+        'product_type' => 'standard',
+        'labor_unit_label' => 'jornada',
+        'labor_unit_price' => 0,
+        'labor_min_units' => 1,
     ];
     $isEdit = (int) ($product['id'] ?: 0) > 0;
     $action = $isEdit ? '/admin/productos/' . (int) $product['id'] . '/actualizar' : '/admin/productos/crear';
@@ -2756,7 +3836,9 @@ function product_form(?array $product = null): void
     <label>Marca<select name="brand" required>' . select_options($brands, (string) $product['brand']) . '</select></label>
     <label>Categoria<input name="category" value="' . h($product['category']) . '"></label>
     <label>Especializacion<select name="specialization" required>' . select_options($specializations, (string) $product['specialization']) . '</select></label>
+    <label>Tipo<select name="product_type"><option value="standard"' . ((string) ($product['product_type'] ?? 'standard') === 'standard' ? ' selected' : '') . '>Equipo</option><option value="labor"' . ((string) ($product['product_type'] ?? 'standard') === 'labor' ? ' selected' : '') . '>Mano de Obra</option></select></label>
     <label>Estado<input name="status" value="' . h($product['status']) . '"></label>
+    <label class="app-check"><input type="checkbox" name="has_stock" value="1" ' . (product_has_stock($product) ? 'checked' : '') . '> Stock: si</label>
     <label>Descripcion corta<input name="short_description" value="' . h($product['short_description']) . '"></label>
     <label class="app-form-wide">Descripcion<textarea name="description" rows="7">' . h($product['description']) . '</textarea></label>
     <label>Precio venta usado<input name="price_sale_used" type="number" step="0.01" value="' . h($product['price_sale_used']) . '"></label>
@@ -2764,11 +3846,19 @@ function product_form(?array $product = null): void
     <label>Alquiler diario<input name="rental_daily" type="number" step="0.01" value="' . h($product['rental_daily']) . '"></label>
     <label>Alquiler semanal<input name="rental_weekly" type="number" step="0.01" value="' . h($product['rental_weekly']) . '"></label>
     <label>Alquiler mensual<input name="rental_monthly" type="number" step="0.01" value="' . h($product['rental_monthly']) . '"></label>
+    <label>Unidad mano de obra<input name="labor_unit_label" value="' . h($product['labor_unit_label'] ?? 'jornada') . '"></label>
+    <label>Precio mano de obra por unidad<input name="labor_unit_price" type="number" step="0.01" value="' . h($product['labor_unit_price'] ?? 0) . '"></label>
+    <label>Minimo unidades mano de obra<input name="labor_min_units" type="number" step="0.01" value="' . h($product['labor_min_units'] ?? 1) . '"></label>
     <label class="app-form-wide">Subir imagenes<input name="product_images[]" type="file" accept="image/*" multiple></label>
     <label class="app-form-wide">Imagenes actuales o URLs externas, una por linea<textarea name="images" rows="4">' . h($imagesText) . '</textarea></label>
     <label class="app-form-wide">Especificaciones, formato Campo: Valor<textarea name="specs" rows="6">' . h(trim($specsText)) . '</textarea></label>
     <label class="app-check"><input type="checkbox" name="is_featured" value="1" ' . ((int) $product['is_featured'] === 1 ? 'checked' : '') . '> Producto destacado</label>
     <label class="app-check"><input type="checkbox" name="is_new" value="1" ' . ((int) $product['is_new'] === 1 ? 'checked' : '') . '> Producto novedad</label>
+    <label class="app-check"><input type="checkbox" name="is_offer" value="1" ' . ((int) ($product['is_offer'] ?? 0) === 1 ? 'checked' : '') . '> Oferta: si</label>
+    <label class="app-check"><input type="checkbox" name="is_disabled" value="1" ' . ((int) ($product['is_disabled'] ?? 0) === 1 ? 'checked' : '') . '> Deshabilitado</label>
+    <label>Inicio de oferta<input name="offer_starts_at" type="datetime-local" value="' . h(str_replace(' ', 'T', substr((string) ($product['offer_starts_at'] ?? ''), 0, 16))) . '"></label>
+    <label>Fin de oferta<input name="offer_ends_at" type="datetime-local" value="' . h(str_replace(' ', 'T', substr((string) ($product['offer_ends_at'] ?? ''), 0, 16))) . '"></label>
+    <p class="app-form-wide app-admin-help">Si marcas Oferta y dejas las fechas vacias, se guarda una oferta exclusiva de ' . OFFER_DURATION_DAYS . ' dias desde el momento de activacion.</p>
     <div class="app-form-actions"><button class="btn-contacto w-button" type="submit">Guardar producto</button>' . $viewButton . '</div>
   </form>
 </main>', 'admin');
@@ -2776,6 +3866,7 @@ function product_form(?array $product = null): void
 
 function save_product(?int $productId = null): array
 {
+    $currentProduct = $productId ? product_by_id($productId, true) : null;
     $name = trim((string) ($_POST['name'] ?? ''));
     $slug = trim((string) ($_POST['slug'] ?? '')) ?: slugify($name);
     $images = array_values(array_filter(array_map('trim', preg_split('/\R+/', (string) ($_POST['images'] ?? '')) ?: [])));
@@ -2787,6 +3878,20 @@ function save_product(?int $productId = null): array
         }
         [$key, $value] = explode(':', $line, 2);
         $specs[] = [trim($key), trim($value)];
+    }
+
+    $isOffer = isset($_POST['is_offer']) ? 1 : 0;
+    $hasStock = isset($_POST['has_stock']) ? 1 : 0;
+    $postedOfferStartsAt = normalize_datetime_value((string) ($_POST['offer_starts_at'] ?? ''));
+    $postedOfferEndsAt = normalize_datetime_value((string) ($_POST['offer_ends_at'] ?? ''));
+    $offerStartsAt = '';
+    $offerEndsAt = '';
+    if ($isOffer === 1) {
+        $previousOfferActiveFlag = (int) ($currentProduct['is_offer'] ?? 0) === 1;
+        $previousStartsAt = normalize_datetime_value((string) ($currentProduct['offer_starts_at'] ?? ''));
+        $previousEndsAt = normalize_datetime_value((string) ($currentProduct['offer_ends_at'] ?? ''));
+        $offerStartsAt = $postedOfferStartsAt ?: ($previousOfferActiveFlag && $previousStartsAt !== '' ? $previousStartsAt : date('Y-m-d H:i:s'));
+        $offerEndsAt = $postedOfferEndsAt ?: ($previousOfferActiveFlag && $previousEndsAt !== '' ? $previousEndsAt : offer_end_from_start($offerStartsAt));
     }
 
     $values = [
@@ -2808,6 +3913,16 @@ function save_product(?int $productId = null): array
         ':specs' => json_encode($specs, JSON_UNESCAPED_UNICODE),
         ':is_featured' => isset($_POST['is_featured']) ? 1 : 0,
         ':is_new' => isset($_POST['is_new']) ? 1 : 0,
+        ':has_stock' => $hasStock,
+        ':stock_quantity' => $hasStock === 1 ? max(1.0, (float) ($currentProduct['stock_quantity'] ?? 1)) : 0.0,
+        ':is_disabled' => isset($_POST['is_disabled']) ? 1 : 0,
+        ':is_offer' => $isOffer,
+        ':offer_starts_at' => $offerStartsAt,
+        ':offer_ends_at' => $offerEndsAt,
+        ':product_type' => (string) ($_POST['product_type'] ?? 'standard') === 'labor' ? 'labor' : 'standard',
+        ':labor_unit_label' => trim((string) ($_POST['labor_unit_label'] ?? 'jornada')) ?: 'jornada',
+        ':labor_unit_price' => (float) ($_POST['labor_unit_price'] ?? 0),
+        ':labor_min_units' => max(1, (float) ($_POST['labor_min_units'] ?? 1)),
     ];
 
     if ($productId) {
@@ -2821,7 +3936,11 @@ function save_product(?int $productId = null): array
                 price_sale_new = :price_sale_new, rental_daily = :rental_daily,
                 rental_weekly = :rental_weekly, rental_monthly = :rental_monthly,
                 images = :images, specs = :specs, is_featured = :is_featured,
-                is_new = :is_new
+                is_new = :is_new, has_stock = :has_stock, stock_quantity = :stock_quantity,
+                is_disabled = :is_disabled, is_offer = :is_offer,
+                offer_starts_at = :offer_starts_at, offer_ends_at = :offer_ends_at, product_type = :product_type,
+                labor_unit_label = :labor_unit_label, labor_unit_price = :labor_unit_price,
+                labor_min_units = :labor_min_units
             WHERE id = :id"
         )->execute($values);
     } else {
@@ -2829,11 +3948,15 @@ function save_product(?int $productId = null): array
             "INSERT INTO products (
                 slug, name, code, brand, category, specialization, short_description,
                 description, status, price_sale_used, price_sale_new, rental_daily,
-                rental_weekly, rental_monthly, images, specs, is_featured, is_new
+                rental_weekly, rental_monthly, images, specs, is_featured, is_new,
+                has_stock, stock_quantity, is_disabled, is_offer, offer_starts_at, offer_ends_at, product_type,
+                labor_unit_label, labor_unit_price, labor_min_units
             ) VALUES (
                 :slug, :name, :code, :brand, :category, :specialization, :short_description,
                 :description, :status, :price_sale_used, :price_sale_new, :rental_daily,
-                :rental_weekly, :rental_monthly, :images, :specs, :is_featured, :is_new
+                :rental_weekly, :rental_monthly, :images, :specs, :is_featured, :is_new,
+                :has_stock, :stock_quantity, :is_disabled, :is_offer, :offer_starts_at, :offer_ends_at, :product_type,
+                :labor_unit_label, :labor_unit_price, :labor_min_units
             )"
         )->execute($values);
         $productId = (int) db()->lastInsertId();
@@ -2923,9 +4046,38 @@ function uploaded_image_file(string $field, string $uploadDir, string $uploadBas
     return $uploadBase . '/' . $name;
 }
 
+function normalize_datetime_value(string $value): string
+{
+    $value = str_replace('T', ' ', trim($value));
+    if ($value === '') {
+        return '';
+    }
+    $timestamp = strtotime($value);
+    if (!$timestamp) {
+        return '';
+    }
+
+    return date('Y-m-d H:i:s', $timestamp);
+}
+
+function offer_end_from_start(string $startsAt): string
+{
+    $timestamp = strtotime($startsAt) ?: time();
+
+    return date('Y-m-d H:i:s', $timestamp + (OFFER_DURATION_DAYS * 86400));
+}
+
 function api_reservation(): void
 {
     $payload = json_decode(file_get_contents('php://input') ?: '{}', true) ?: [];
+    $product = product_by_id((int) ($payload['product_id'] ?? 0));
+    if (!$product || !product_is_orderable($product)) {
+        http_response_code(409);
+        header('Content-Type: application/json; charset=utf-8');
+        echo json_encode(['ok' => false, 'message' => 'Este producto no esta disponible para nuevos pedidos.']);
+        return;
+    }
+
     db()->prepare(
         'INSERT INTO reservations (product_id, rental_plan, start_date, end_date, city) VALUES (?, ?, ?, ?, ?)'
     )->execute([
@@ -2938,6 +4090,95 @@ function api_reservation(): void
 
     header('Content-Type: application/json; charset=utf-8');
     echo json_encode(['ok' => true, 'message' => 'Solicitud recibida. Agregamos el equipo al carrito.']);
+}
+
+function rental_days_from_item(array $item): int
+{
+    $savedDays = (int) ($item['rental_days'] ?? 0);
+    if ($savedDays > 0) {
+        return $savedDays;
+    }
+    $start = strtotime((string) ($item['start_date'] ?? ''));
+    $end = strtotime((string) ($item['end_date'] ?? ''));
+    if (!$start || !$end || $end < $start) {
+        return 1;
+    }
+
+    return max(1, (int) floor(($end - $start) / 86400) + 1);
+}
+
+function rental_units_from_item(array $item, int $days): int
+{
+    $savedUnits = (int) ($item['rental_units'] ?? 0);
+    if ($savedUnits > 0) {
+        return $savedUnits;
+    }
+    $planDays = match ((string) ($item['rental_plan'] ?? '')) {
+        'semanal' => 7,
+        'mensual' => 30,
+        default => 1,
+    };
+
+    return max(1, (int) ceil($days / $planDays));
+}
+
+function normalize_checkout_item(array $item, ?array $product = null): array
+{
+    $quantity = max(1, (int) ($item['qty'] ?? 1));
+    $unitPrice = max(0.0, (float) ($item['unit_price'] ?? 0));
+    $mode = (string) ($item['mode'] ?? 'rental');
+    if ($mode === 'labor') {
+        if (!$product || (string) ($product['product_type'] ?? '') !== 'labor') {
+            throw new InvalidArgumentException('El item de mano de obra no corresponde a un producto valido.');
+        }
+        $calculation = labor_calculation_from_item($item);
+        if (!$calculation) {
+            throw new InvalidArgumentException('Selecciona un tipo de trabajo activo para Mano de Obra.');
+        }
+        $details = ['kind' => 'labor'] + $calculation;
+
+        return [
+            'product_id' => isset($item['id']) ? (int) $item['id'] : null,
+            'product_name' => 'Mano de Obra',
+            'product_url' => (string) ($item['url'] ?? ''),
+            'image_url' => (string) ($item['image'] ?? ''),
+            'mode' => 'labor',
+            'quantity' => 1,
+            'unit_price' => $calculation['total'],
+            'subtotal' => $calculation['total'],
+            'price_label' => 'Mano de Obra',
+            'rental_days' => 0,
+            'rental_units' => 0,
+            'rental_plan' => '',
+            'start_date' => '',
+            'end_date' => '',
+            'city' => (string) ($item['city'] ?? ''),
+            'item_details_json' => json_encode($details, JSON_UNESCAPED_UNICODE),
+        ];
+    }
+    $rentalDays = $mode === 'rental' ? rental_days_from_item($item) : 0;
+    $rentalUnits = $mode === 'rental' ? rental_units_from_item($item, $rentalDays) : 0;
+    $multiplier = $mode === 'rental' ? max(1, $rentalUnits) : 1;
+    $subtotal = $unitPrice * $quantity * $multiplier;
+
+    return [
+        'product_id' => isset($item['id']) ? (int) $item['id'] : null,
+        'product_name' => trim((string) ($item['name'] ?? 'Producto')) ?: 'Producto',
+        'product_url' => (string) ($item['url'] ?? ''),
+        'image_url' => (string) ($item['image'] ?? ''),
+        'mode' => $mode,
+        'quantity' => $quantity,
+        'unit_price' => $unitPrice,
+        'subtotal' => round($subtotal, 2),
+        'price_label' => (string) ($item['price_label'] ?? ''),
+        'rental_days' => $rentalDays,
+        'rental_units' => $rentalUnits,
+        'rental_plan' => (string) ($item['rental_plan'] ?? ''),
+        'start_date' => (string) ($item['start_date'] ?? ''),
+        'end_date' => (string) ($item['end_date'] ?? ''),
+        'city' => (string) ($item['city'] ?? ''),
+        'item_details_json' => '{}',
+    ];
 }
 
 function api_checkout(): void
@@ -2956,6 +4197,41 @@ function api_checkout(): void
         return;
     }
 
+    $requiredFields = [
+        'name' => 'Ingresa el nombre y apellido.',
+        'phone' => 'Ingresa el telefono.',
+        'fiscal_name' => 'Ingresa la razon social.',
+        'fiscal_id' => 'Ingresa el R.N.C.',
+        'delivery_type' => 'Selecciona el tipo de entrega.',
+        'city' => 'Selecciona la ciudad de entrega.',
+        'address' => 'Selecciona la direccion de entrega.',
+        'freight_truck_type_id' => 'Selecciona el tipo de camion para el flete.',
+        'delivery_contact_first_name' => 'Ingresa el nombre de quien recibe.',
+        'delivery_contact_last_name' => 'Ingresa el apellido de quien recibe.',
+        'delivery_office_phone' => 'Ingresa el telefono de oficina.',
+        'delivery_mobile_phone' => 'Ingresa el movil del responsable.',
+    ];
+    foreach ($requiredFields as $field => $message) {
+        if (trim((string) ($customer[$field] ?? '')) === '') {
+            http_response_code(422);
+            header('Content-Type: application/json; charset=utf-8');
+            echo json_encode(['ok' => false, 'message' => $message]);
+            return;
+        }
+    }
+    if (!in_array((string) ($customer['delivery_type'] ?? ''), ['empresa', 'obra'], true)) {
+        http_response_code(422);
+        header('Content-Type: application/json; charset=utf-8');
+        echo json_encode(['ok' => false, 'message' => 'Selecciona un tipo de entrega valido.']);
+        return;
+    }
+    if (trim((string) ($customer['city'] ?? '')) === 'Santo Domingo' && trim((string) ($customer['delivery_zone'] ?? '')) === '') {
+        http_response_code(422);
+        header('Content-Type: application/json; charset=utf-8');
+        echo json_encode(['ok' => false, 'message' => 'Ingresa la zona para entregas en Santo Domingo.']);
+        return;
+    }
+
     $passwordError = password_validation_error($password, $passwordConfirm);
     if ($passwordError !== '') {
         http_response_code(422);
@@ -2966,6 +4242,85 @@ function api_checkout(): void
 
     $customerSnapshot = $customer;
     unset($customerSnapshot['password'], $customerSnapshot['password_confirm']);
+    $fiscalSnapshot = [
+        'fiscal_name' => trim((string) ($customer['fiscal_name'] ?? '')),
+        'fiscal_id' => trim((string) ($customer['fiscal_id'] ?? '')),
+        'fiscal_address' => trim((string) ($customer['fiscal_address'] ?? '')),
+    ];
+    $deliveryType = (string) ($customer['delivery_type'] ?? '');
+    $deliveryTypeLabel = $deliveryType === 'empresa' ? 'Entrega en Empresa' : ($deliveryType === 'obra' ? 'Entrega en Obra' : $deliveryType);
+    $deliveryDistanceKm = max(0.0, (float) ($customer['delivery_distance_km'] ?? 0));
+    $freightSettings = freight_settings();
+    $truckTypeId = (int) ($customer['freight_truck_type_id'] ?? 0);
+    $truckType = freight_truck_type_by_id($truckTypeId, true);
+    if (!$truckType) {
+        http_response_code(422);
+        header('Content-Type: application/json; charset=utf-8');
+        echo json_encode(['ok' => false, 'message' => 'Selecciona un tipo de camion activo para el flete.']);
+        return;
+    }
+    $freightCostPerKm = max(0.0, (float) ($truckType['cost_per_km'] ?? 0));
+    $roundTripFactor = max(0.0, (float) $freightSettings['round_trip_factor']);
+    $roundTripKm = $deliveryDistanceKm * $roundTripFactor;
+    $freightAmount = calculate_freight_amount($deliveryDistanceKm, $truckType);
+    $deliverySnapshot = [
+        'type' => $deliveryType,
+        'type_label' => $deliveryTypeLabel,
+        'address' => trim((string) ($customer['address'] ?? '')),
+        'city' => trim((string) ($customer['city'] ?? '')),
+        'zone' => trim((string) ($customer['delivery_zone'] ?? '')),
+        'contact_first_name' => trim((string) ($customer['delivery_contact_first_name'] ?? '')),
+        'contact_last_name' => trim((string) ($customer['delivery_contact_last_name'] ?? '')),
+        'contact_name' => trim((string) (($customer['delivery_contact_first_name'] ?? '') . ' ' . ($customer['delivery_contact_last_name'] ?? ''))),
+        'office_phone' => trim((string) ($customer['delivery_office_phone'] ?? '')),
+        'mobile_phone' => trim((string) ($customer['delivery_mobile_phone'] ?? '')),
+        'reference' => trim((string) ($customer['delivery_reference'] ?? '')),
+        'place_id' => trim((string) ($customer['delivery_place_id'] ?? '')),
+        'lat' => trim((string) ($customer['delivery_lat'] ?? '')),
+        'lng' => trim((string) ($customer['delivery_lng'] ?? '')),
+        'distance_km_one_way' => $deliveryDistanceKm,
+        'distance_km_round_trip' => $roundTripKm,
+        'freight_truck_type_id' => (int) $truckType['id'],
+        'freight_truck_type_slug' => (string) $truckType['slug'],
+        'freight_truck_type_name' => (string) $truckType['name'],
+        'freight_cost_per_km' => $freightCostPerKm,
+        'freight_total' => $freightAmount,
+        'origin_address' => (string) $freightSettings['origin_address'],
+        'origin_lat' => (string) $freightSettings['origin_lat'],
+        'origin_lng' => (string) $freightSettings['origin_lng'],
+        'origin_place_id' => (string) $freightSettings['origin_place_id'],
+    ];
+    $normalizedItems = [];
+    $subtotalAmount = 0.0;
+    foreach ($items as $item) {
+        if (!is_array($item)) {
+            continue;
+        }
+        $product = product_by_id((int) ($item['id'] ?? 0));
+        if (!$product || !product_is_orderable($product)) {
+            http_response_code(409);
+            header('Content-Type: application/json; charset=utf-8');
+            echo json_encode(['ok' => false, 'message' => 'Uno de los productos del carrito ya no esta disponible. Quitalo del carrito para continuar.']);
+            return;
+        }
+        try {
+            $normalized = normalize_checkout_item($item, $product);
+        } catch (InvalidArgumentException $error) {
+            http_response_code(422);
+            header('Content-Type: application/json; charset=utf-8');
+            echo json_encode(['ok' => false, 'message' => $error->getMessage()]);
+            return;
+        }
+        $normalizedItems[] = $normalized;
+        $subtotalAmount += $normalized['subtotal'];
+    }
+    if ($normalizedItems === []) {
+        http_response_code(422);
+        header('Content-Type: application/json; charset=utf-8');
+        echo json_encode(['ok' => false, 'message' => 'El carrito no tiene items validos.']);
+        return;
+    }
+    $totalAmount = round($subtotalAmount + $freightAmount, 2);
 
     $pdo = db();
     $pdo->beginTransaction();
@@ -3021,31 +4376,49 @@ function api_checkout(): void
             $userId = (int) $pdo->lastInsertId();
         }
 
-        $pdo->prepare('INSERT INTO orders (user_id, status, customer_snapshot) VALUES (?, ?, ?)')->execute([
+        $pdo->prepare(
+            'INSERT INTO orders (
+                user_id, status, customer_snapshot, fiscal_snapshot, delivery_snapshot,
+                subtotal_amount, freight_amount, total_amount
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+        )->execute([
             $userId,
             'validado',
             json_encode($customerSnapshot, JSON_UNESCAPED_UNICODE),
+            json_encode($fiscalSnapshot, JSON_UNESCAPED_UNICODE),
+            json_encode($deliverySnapshot, JSON_UNESCAPED_UNICODE),
+            round($subtotalAmount, 2),
+            $freightAmount,
+            $totalAmount,
         ]);
         $orderId = (int) $pdo->lastInsertId();
 
         $itemStmt = $pdo->prepare(
             "INSERT INTO order_items (
-                order_id, product_id, product_name, product_url, mode, quantity,
-                rental_plan, start_date, end_date, city
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                order_id, product_id, product_name, product_url, image_url, mode, quantity,
+                unit_price, subtotal, price_label, rental_days, rental_units,
+                rental_plan, start_date, end_date, city, item_details_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
         );
-        foreach ($items as $item) {
+        foreach ($normalizedItems as $item) {
             $itemStmt->execute([
                 $orderId,
-                isset($item['id']) ? (int) $item['id'] : null,
-                (string) ($item['name'] ?? 'Producto'),
-                (string) ($item['url'] ?? ''),
-                (string) ($item['mode'] ?? 'rental'),
-                max(1, (int) ($item['qty'] ?? 1)),
-                (string) ($item['rental_plan'] ?? ''),
-                (string) ($item['start_date'] ?? ''),
-                (string) ($item['end_date'] ?? ''),
-                (string) ($item['city'] ?? ($customer['city'] ?? '')),
+                $item['product_id'],
+                $item['product_name'],
+                $item['product_url'],
+                $item['image_url'],
+                $item['mode'],
+                $item['quantity'],
+                $item['unit_price'],
+                $item['subtotal'],
+                $item['price_label'],
+                $item['rental_days'],
+                $item['rental_units'],
+                $item['rental_plan'],
+                $item['start_date'],
+                $item['end_date'],
+                $item['city'] ?: (string) ($customer['city'] ?? ''),
+                $item['item_details_json'],
             ]);
         }
         $pdo->commit();
@@ -3056,14 +4429,24 @@ function api_checkout(): void
         throw $error;
     }
 
+    $proformaSent = false;
+    try {
+        $proformaSent = send_order_proforma_to_customer($orderId);
+    } catch (Throwable $error) {
+        file_put_contents(__DIR__ . '/mail.log', '[' . date('c') . '] proforma-email #' . $orderId . ' exception=' . $error->getMessage() . PHP_EOL, FILE_APPEND);
+    }
+
     session_regenerate_id(true);
     $_SESSION['user_id'] = $userId;
 
     header('Content-Type: application/json; charset=utf-8');
     echo json_encode([
         'ok' => true,
-        'message' => 'Pedido registrado. Tu cuenta quedo creada y ya estas ingresado.',
+        'message' => $proformaSent
+            ? 'Pedido registrado. Enviamos la proforma PDF a tu email.'
+            : 'Pedido registrado. La proforma PDF quedo generada y el equipo comercial la confirmara por email.',
         'account_url' => public_path('/cuenta'),
+        'proforma_email_sent' => $proformaSent,
     ]);
 }
 
@@ -3357,6 +4740,14 @@ function dispatch(): void
             send_admin_order_email((int) $match[1]);
             return;
         }
+        if (preg_match('#^/admin/pedidos/(\d+)/proforma-email$#', $path, $match)) {
+            send_order_proforma_email((int) $match[1]);
+            return;
+        }
+        if ($path === '/admin/configuracion') {
+            save_admin_settings();
+            return;
+        }
     }
 
     if ($path === '/') {
@@ -3373,6 +4764,10 @@ function dispatch(): void
     }
     if ($path === '/productos-novedades') {
         filtered_product_listing_page('novedades');
+        return;
+    }
+    if ($path === '/productos-oferta') {
+        filtered_product_listing_page('ofertas');
         return;
     }
     if ($path === '/especializacion') {
@@ -3462,8 +4857,16 @@ function dispatch(): void
         admin_order_detail_page((int) $match[1]);
         return;
     }
+    if (preg_match('#^/admin/pedidos/(\d+)/proforma\.pdf$#', $path, $match)) {
+        output_order_proforma_pdf((int) $match[1]);
+        return;
+    }
     if ($path === '/admin/contacto') {
         admin_contact_page();
+        return;
+    }
+    if ($path === '/admin/configuracion') {
+        admin_settings_page();
         return;
     }
     if ($path === '/admin/usuarios') {

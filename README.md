@@ -57,6 +57,26 @@ INEXO_SMTP_TIMEOUT=20
 INEXO_MAIL_FROM=info@inexo.com.do
 INEXO_MAIL_FROM_NAME="Inexo Rental"
 INEXO_CONTACT_EMAIL=info@inexo.com.do
+
+INEXO_GOOGLE_MAPS_BROWSER_KEY=
+```
+
+## Checkout, flete y proformas
+
+El checkout guarda datos fiscales, datos de entrega, coordenadas/Place ID cuando Google Places esta configurado, subtotales, flete y total en el pedido.
+
+La proforma PDF se descarga desde `/admin/pedidos/{id}/proforma.pdf` y se puede enviar al cliente desde el detalle del pedido en admin.
+
+El calculo de flete usa la configuracion de `/admin/configuracion`: direccion base, cargo base, precio por km, minimo y factor ida/vuelta. La distancia se completa con Google Maps Distance Matrix cuando hay `INEXO_GOOGLE_MAPS_BROWSER_KEY` o una clave guardada en admin; tambien puede ingresarse manualmente.
+
+## Mano de Obra
+
+El producto especial `Mano de Obra` usa tipos de trabajo configurables en `/admin/configuracion`. El checkout recalcula el total en backend y guarda el snapshot del calculo en `order_items.item_details_json`, incluyendo tipo de trabajo, tiempo, unidad, trabajadores, m², componentes y formula usada.
+
+Formula centralizada en `calculate_labor_total()`:
+
+```text
+total = precio_base + (costo_trabajador x trabajadores x tiempo) + (costo_tiempo x tiempo) + (costo_m2 x m²)
 ```
 
 ## Importacion Deados
