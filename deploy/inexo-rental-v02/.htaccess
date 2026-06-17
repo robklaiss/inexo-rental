@@ -1,0 +1,16 @@
+RewriteEngine On
+
+DirectoryIndex index.php
+Options -Indexes
+
+<FilesMatch "(^\.|\.sqlite3($|\.)|\.db($|\.)|\.log$|\.env$|\.bak$|\.backup($|\.)|\.sql$|composer\.(json|lock)$|package(-lock)?\.json$)">
+    Require all denied
+</FilesMatch>
+
+RewriteRule ^(data|deploy)(/|$) - [F,L]
+
+RewriteCond %{REQUEST_FILENAME} -f [OR]
+RewriteCond %{REQUEST_FILENAME} -d
+RewriteRule ^ - [L]
+
+RewriteRule ^ index.php [L]

@@ -1,0 +1,34 @@
+{
+  "origin": {
+    "address": "REEMPLAZAR: direccion oficial de Inexo",
+    "lat": "",
+    "lng": "",
+    "place_id": ""
+  },
+  "trucks": [
+    {
+      "slug": "pequeno",
+      "max_weight_kg": 0,
+      "max_volume_m3": 0,
+      "cost_per_km": 0,
+      "description": "",
+      "is_active": true
+    },
+    {
+      "slug": "mediano",
+      "max_weight_kg": 0,
+      "max_volume_m3": 0,
+      "cost_per_km": 0,
+      "description": "",
+      "is_active": true
+    },
+    {
+      "slug": "grande",
+      "max_weight_kg": 0,
+      "max_volume_m3": 0,
+      "cost_per_km": 0,
+      "description": "",
+      "is_active": true
+    }
+  ]
+}

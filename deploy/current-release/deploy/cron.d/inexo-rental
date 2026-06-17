@@ -1,0 +1,5 @@
+# Copiar a /etc/cron.d/inexo-rental y reemplazar APP_DIR/PHP_BIN si difieren.
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+*/5 * * * * www-data cd /var/www/inexo-rental/current && PHP_BIN=/usr/bin/php ./scripts/run_order_reminders.sh >> /var/log/inexo-rental-reminders.log 2>&1
